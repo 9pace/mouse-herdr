@@ -328,7 +328,14 @@ struct AgentsPage: View {
                 }
             }
             if urgent, !speech.text.isEmpty {
-                Text(speech.text).font(.system(size: 12.5, weight: .medium, design: .rounded))
+                if let approval = a.permission {
+                    Label("Wants to run\(approval.tool.isEmpty ? " this" : " \(approval.tool)"). \(a.prompt.isEmpty ? "Do you want to proceed?" : a.prompt)",
+                          systemImage: "exclamationmark.shield.fill")
+                        .font(.system(size: 11.5, weight: .semibold)).foregroundStyle(Palette.accent)
+                        .padding(.leading, 34)
+                }
+                Text(speech.text).font(a.permission != nil ? .system(size: 12, weight: .medium, design: .monospaced)
+                                                           : .system(size: 12.5, weight: .medium, design: .rounded))
                     .lineLimit(4).fixedSize(horizontal: false, vertical: true)
                     .padding(.leading, 34)
                 if !speech.options.isEmpty {

@@ -13,6 +13,21 @@ struct AgentInfo: Identifiable, Equatable {
     var kind = ""         // question, permission, auth…
     var typeOption: Int?  // the number of the dialog's "Type something" choice, when it has one
     var hints: [Int: String] = [:]   // the explanation shown under each choice, by choice number (1-based)
+    var screenOptions: [String] = [] // the numbered choices read off its dialog, in order
+    var prompt = ""                  // the dialog's own question line, e.g. "Do you want to proceed?"
+
+    /// For a request to approve an action: the tool it wants to use and exactly what it would do.
+    var permission: (tool: String, detail: String)? {
+        var text = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let approve = text.lowercased().hasPrefix("approve ")
+        guard kind == "permission" || approve else { return nil }
+        if approve { text = String(text.dropFirst(8)) }
+        // "Bash: rm -rf build" → the tool, then what it would run.
+        if let colon = text.firstIndex(of: ":"), text[..<colon].count <= 24, !text[..<colon].contains(" ") {
+            return (String(text[..<colon]), String(text[text.index(after: colon)...]).trimmingCharacters(in: .whitespaces))
+        }
+        return ("", text)
+    }
 
     /// The agent's words, split into the question and any choices it offered.
     var speech: (text: String, options: [String]) { speech(full: false) }
@@ -24,8 +39,11 @@ struct AgentInfo: Identifiable, Equatable {
             text = String(text.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
         }
         var options: [String] = []
+        let asksApproval = permission != nil
+        // An approval shows exactly what would run; nothing in it is a list of choices.
+        if let permission { text = permission.detail }
         // Choices arrive as a trailing "(A · B · C)"; find the bracket that closes at the very end.
-        if text.hasSuffix(")") {
+        if !asksApproval, text.hasSuffix(")") {
             let chars = Array(text)
             var depth = 0, open: Int?
             for i in stride(from: chars.count - 1, through: 0, by: -1) {
@@ -39,6 +57,10 @@ struct AgentInfo: Identifiable, Equatable {
                     text = String(chars[..<open]).trimmingCharacters(in: .whitespaces)
                 }
             }
+        }
+        // "Do you want to proceed?" dialogs list their choices only on screen.
+        if options.isEmpty {
+            options = screenOptions.prefix(5).map { $0.count > 44 ? String($0.prefix(43)) + "…" : $0 }
         }
         let limit = full ? 1600 : 220
         if text.count > limit { text = String(text.prefix(limit - 1)) + "…" }
@@ -218,31 +240,58 @@ final class AgentWatcher {
         return out.sorted { ($0.rank, $0.space, $0.tab) < ($1.rank, $1.space, $1.tab) }
     }
 
-    /// Read a question dialog off the agent's screen: the explanation under each numbered choice,
-    /// and the number of its "Type something" choice if it has one.
-    static func parseDialog(_ screen: String) -> (hints: [Int: String], typeOption: Int?) {
+    /// Read a dialog off the agent's screen: its numbered choices, the explanation under each,
+    /// its own question line, and the number of its "Type something" choice if it has one.
+    static func parseDialog(_ screen: String) -> (hints: [Int: String], typeOption: Int?, options: [String], prompt: String) {
+        func trimmed(_ l: String) -> String { l.trimmingCharacters(in: .whitespaces) }
+        func isRule(_ t: String) -> Bool { t.hasPrefix("─") || t.hasPrefix("╌") }
+        func isFooter(_ t: String) -> Bool { t.hasPrefix("Enter to") || t.hasPrefix("Esc to") || t.hasPrefix("[hc]") }
+        var lines = screen.components(separatedBy: "\n")
+        // The conversation above the dialog can contain numbered lists of its own. The selection
+        // marker ("❯ 1.") is only in the dialog, so keep just the block of lines around it.
+        if let marker = lines.lastIndex(where: { $0.range(of: #"❯\s*\d{1,2}\.\s"#, options: .regularExpression) != nil }) {
+            var first = marker, last = marker
+            while first > 0 {
+                let t = trimmed(lines[first - 1])
+                if t.isEmpty || isRule(t) { break }
+                first -= 1
+            }
+            while last < lines.count - 1 {
+                let t = trimmed(lines[last + 1])
+                if t.isEmpty || isRule(t) || isFooter(t) { break }
+                last += 1
+            }
+            lines = Array(lines[first...last])
+        }
+
         var hints: [Int: String] = [:]
+        var labels: [Int: String] = [:]
         var typeOption: Int?
         var current: Int?
-        for raw in screen.components(separatedBy: "\n") {
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            if line.hasPrefix("─") || line.hasPrefix("Enter to select") || line.hasPrefix("[hc]") { current = nil; continue }
+        var promptLines: [String] = []
+        for raw in lines {
+            let line = trimmed(raw)
+            if isRule(line) || isFooter(line) { current = nil; continue }
             var body = line
-            if body.hasPrefix("❯") { body = String(body.dropFirst()).trimmingCharacters(in: .whitespaces) }
+            if body.hasPrefix("❯") { body = trimmed(String(body.dropFirst())) }
             let digits = body.prefix { $0.isNumber }
             if !digits.isEmpty, digits.count <= 2, body.dropFirst(digits.count).hasPrefix(". "), let n = Int(digits) {
-                let label = body.dropFirst(digits.count + 2)
+                let label = String(body.dropFirst(digits.count + 2))
                 if label.lowercased().hasPrefix("type something") { typeOption = n; current = nil }
-                else { current = n }
+                else { labels[n] = label; current = n }
                 continue
             }
+            if labels.isEmpty, typeOption == nil, !line.isEmpty { promptLines.append(line) }
             guard let n = current, !line.isEmpty, raw.hasPrefix("   ") else {
                 if line.isEmpty { current = nil }
                 continue
             }
             hints[n] = (hints[n].map { $0 + " " } ?? "") + line
         }
-        return (hints, typeOption)
+        // Choices are numbered 1, 2, 3… with no gaps; stop at the first gap.
+        var options: [String] = []
+        while let label = labels[options.count + 1] { options.append(label) }
+        return (hints, typeOption, options, promptLines.last ?? "")
     }
 
     /// Fill in what each agent is saying (its title and question) from `hc get`.
@@ -254,14 +303,19 @@ final class AgentWatcher {
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
             let status = obj["status"] as? [String: Any]
             // A waiting agent's dialog may also offer a free-text choice; find its number on the screen.
-            var typeOption: Int?
-            var hints: [Int: String] = [:]
+            var dialog = parseDialog("")
             if list[i].needsYou, let screen = run(hc, ["read", list[i].id]), let text = String(data: screen, encoding: .utf8) {
-                (hints, typeOption) = parseDialog(text)
+                dialog = parseDialog(text)
+                // A choice too long for its button is shown in full when it is pointed at.
+                for (n, label) in dialog.options.enumerated() where label.count > 44 && dialog.hints[n + 1] == nil {
+                    dialog.hints[n + 1] = label
+                }
             }
             lock.lock()
-            out[i].typeOption = typeOption
-            out[i].hints = hints
+            out[i].typeOption = dialog.typeOption
+            out[i].hints = dialog.hints
+            out[i].screenOptions = dialog.options
+            out[i].prompt = dialog.prompt
             out[i].title = obj["title"] as? String ?? ""
             out[i].message = status?["msg"] as? String ?? ""
             out[i].kind = status?["kind"] as? String ?? ""
@@ -443,7 +497,9 @@ final class RingModel: ObservableObject {
         let body = speech.text.isEmpty ? a.title : speech.text
         // Measure the text the same way it will be drawn.
         let base = NSFont.systemFont(ofSize: 14, weight: .medium)
-        let font = base.fontDescriptor.withDesign(.rounded).flatMap { NSFont(descriptor: $0, size: 14) } ?? base
+        let font = a.permission != nil
+            ? NSFont.monospacedSystemFont(ofSize: 13, weight: .medium)   // a command is shown as typed
+            : base.fontDescriptor.withDesign(.rounded).flatMap { NSFont(descriptor: $0, size: 14) } ?? base
         let para = NSMutableParagraphStyle()
         para.lineSpacing = 2
         let box = (body as NSString).boundingRect(
@@ -735,9 +791,12 @@ struct SpeechBubble: View {
     var body: some View {
         let speech = agent.speech(full: bubble.expanded)
         let ink = Color(white: 0.10)
-        let heading = agent.needsYou
-            ? (agent.kind.isEmpty ? "Waiting for you" : "Asks: \(agent.kind)")
-            : agent.statusWord.capitalized
+        let approval = agent.needsYou ? agent.permission : nil
+        let heading = approval != nil
+            ? "Needs approval" + (approval!.tool.isEmpty ? "" : " · \(approval!.tool)")
+            : agent.needsYou
+                ? (agent.kind.isEmpty ? "Waiting for you" : "Asks: \(agent.kind)")
+                : agent.statusWord.capitalized
         return ZStack(alignment: .topLeading) {
             Group {
                 Tail(toward: bubble.toward).fill(Color.white)
@@ -750,7 +809,11 @@ struct SpeechBubble: View {
             .frame(width: bubble.size.width, height: bubble.size.height)
 
             HStack(spacing: 6) {
-                Circle().fill(agent.needsYou ? Palette.accent : agent.color).frame(width: 8, height: 8)
+                if approval != nil {
+                    Image(systemName: "exclamationmark.shield.fill").font(.system(size: 11, weight: .bold)).foregroundStyle(Palette.accent)
+                } else {
+                    Circle().fill(agent.needsYou ? Palette.accent : agent.color).frame(width: 8, height: 8)
+                }
                 Text("\(agent.space.uppercased())  ·  \(heading.uppercased())")
                     .font(.system(size: 10, weight: .heavy)).kerning(0.5)
                     .foregroundStyle(agent.needsYou ? Palette.accent : Color(white: 0.4)).lineLimit(1)
@@ -759,7 +822,8 @@ struct SpeechBubble: View {
             .offset(x: RingModel.pad, y: RingModel.pad)
 
             Text(speech.text.isEmpty ? agent.title : speech.text)
-                .font(.system(size: 14, weight: .medium, design: .rounded))
+                .font(approval != nil ? .system(size: 13, weight: .medium, design: .monospaced)
+                                      : .system(size: 14, weight: .medium, design: .rounded))
                 .foregroundStyle(ink)
                 .lineSpacing(2)
                 .frame(width: bubble.size.width - 2 * RingModel.pad, height: bubble.textHeight, alignment: .topLeading)
@@ -770,6 +834,7 @@ struct SpeechBubble: View {
                     let r = RingModel.optionRect(i, in: bubble)
                     let own = i >= speech.options.count
                     answerButton(i, own ? "Type your own answer…" : speech.options[i], own: own,
+                                 deny: !own && speech.options[i].lowercased().hasPrefix("no"),
                                  hot: model.hoveredOption == i, sent: model.sentOption == i)
                         .frame(width: r.width, height: r.height)
                         .offset(x: r.minX, y: r.minY)
@@ -782,6 +847,7 @@ struct SpeechBubble: View {
                 }
                 Text(model.sentOption != nil ? "Sent — waiting for the agent…"
                      : (!bubble.expanded && agent.isLongQuestion) ? "Move onto the bubble to read the whole question"
+                     : approval != nil ? "\(agent.prompt.isEmpty ? "Do you want to proceed?" : agent.prompt)  Click an answer to send it"
                      : "Point at an answer and click to send it")
                     .font(.system(size: 10.5, weight: .medium))
                     .foregroundStyle(Color(white: 0.45))
@@ -811,12 +877,16 @@ struct SpeechBubble: View {
     }
 
     /// A chunky, game-style answer button with a key-cap number.
-    private func answerButton(_ i: Int, _ text: String, own: Bool, hot: Bool, sent: Bool) -> some View {
+    private func answerButton(_ i: Int, _ text: String, own: Bool, deny: Bool = false, hot: Bool, sent: Bool) -> some View {
         let green = Color(red: 0.20, green: 0.72, blue: 0.42)
+        // Refusing looks different from agreeing, so a "No" is never picked by mistake.
+        let hotColors = deny
+            ? [Color(white: 0.42), Color(white: 0.26)]
+            : [Color(red: 1.0, green: 0.60, blue: 0.40), Palette.accent]
         let face: AnyShapeStyle = sent
             ? AnyShapeStyle(LinearGradient(colors: [green.opacity(0.9), green], startPoint: .top, endPoint: .bottom))
             : hot
-                ? AnyShapeStyle(LinearGradient(colors: [Color(red: 1.0, green: 0.60, blue: 0.40), Palette.accent], startPoint: .top, endPoint: .bottom))
+                ? AnyShapeStyle(LinearGradient(colors: hotColors, startPoint: .top, endPoint: .bottom))
                 : AnyShapeStyle(LinearGradient(colors: [Color(white: 0.98), Color(white: 0.91)], startPoint: .top, endPoint: .bottom))
         let lit = hot || sent
         return HStack(spacing: 10) {
@@ -826,10 +896,10 @@ struct SpeechBubble: View {
                     Image(systemName: "checkmark").font(.system(size: 12, weight: .heavy)).foregroundStyle(green)
                 } else if own {
                     Image(systemName: "pencil").font(.system(size: 13, weight: .heavy))
-                        .foregroundStyle(hot ? Palette.accent : Color.white)
+                        .foregroundStyle(hot ? (deny ? Color(white: 0.2) : Palette.accent) : Color.white)
                 } else {
                     Text("\(i + 1)").font(.system(size: 13, weight: .heavy, design: .rounded))
-                        .foregroundStyle(hot ? Palette.accent : Color.white)
+                        .foregroundStyle(hot ? (deny ? Color(white: 0.2) : Palette.accent) : Color.white)
                 }
             }
             .frame(width: 26, height: 26)
@@ -850,7 +920,7 @@ struct SpeechBubble: View {
             .stroke(lit ? Color.white.opacity(0.0) : Color(white: 0.10).opacity(0.22), lineWidth: 1.5))
         // A darker lip underneath gives the button some depth.
         .background(RoundedRectangle(cornerRadius: 13, style: .continuous)
-            .fill(sent ? green.opacity(0.55) : hot ? Color(red: 0.78, green: 0.26, blue: 0.20) : Color(white: 0.72))
+            .fill(sent ? green.opacity(0.55) : hot ? (deny ? Color(white: 0.14) : Color(red: 0.78, green: 0.26, blue: 0.20)) : Color(white: 0.72))
             .offset(y: hot ? 2 : 3))
         .offset(y: hot ? 1 : 0)
         .scaleEffect(hot ? 1.025 : 1)

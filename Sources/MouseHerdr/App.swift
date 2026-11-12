@@ -105,9 +105,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 ────────
                   5. Chat about this
                 """
-                (list[0].hints, list[0].typeOption) = AgentWatcher.parseDialog(sampleScreen)
-                print("parsed hints:", list[0].hints.keys.sorted(), "type option:", list[0].typeOption ?? -1)
+                let dialog = AgentWatcher.parseDialog(sampleScreen)
+                list[0].hints = dialog.hints
+                list[0].typeOption = dialog.typeOption
                 list[0].message = "answer: Question 4: Refunds over $500 currently go through in one step. Finance flagged three cases last quarter where a refund was issued twice because the first attempt timed out and the agent retried it. A second approver would catch those, but it adds a delay of up to a day for customers in regions where the approver is offline, and support has asked that we do not slow down the common case. Should refunds over $500 need a second approver, or keep the single-step flow we have today? (Second approver (Recommended) · Keep single step · Decide per region)"
+                // "--permission" shows a request to approve a risky command instead of a question.
+                if args.contains("--permission") {
+                    list[0] = AppDelegate.sampleAgents[1]
+                }
             }
             if forced == nil { model.herdr = .running(agents: list.count) }
             model.layout(list)
@@ -346,8 +351,19 @@ extension AppDelegate {
         if list.count > 1 {
             list[0].kind = "question"
             list[0].message = "answer: Should refunds over $500 need a second approver, or keep the single-step flow we have today? (Second approver (Recommended) · Keep single step · Decide per region)"
+            // A request to approve a risky command, as an agent reports it.
             list[1].kind = "permission"
-            list[1].message = "Allow running the database migration on staging? (Yes · Yes, and don't ask again · No)"
+            list[1].message = "approve Bash: psql $STAGING_URL -f migrations/0042_drop_legacy_orders.sql"
+            let dialog = AgentWatcher.parseDialog("""
+             Do you want to proceed?
+             ❯ 1. Yes
+               2. Yes, and don't ask again for psql commands in this project
+               3. No
+             Esc to cancel · Tab to amend
+            """)
+            list[1].screenOptions = dialog.options
+            list[1].prompt = dialog.prompt
+            list[1].hints = [2: "Yes, and don't ask again for psql commands in this project"]
         }
         return list
     }()

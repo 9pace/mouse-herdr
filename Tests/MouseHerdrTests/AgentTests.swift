@@ -76,4 +76,64 @@ final class AgentTests: XCTestCase {
         XCTAssertNil(dialog.typeOption)
         XCTAssertTrue(dialog.hints.isEmpty)
     }
+
+    // A real Claude Code approval prompt, as herdr-core shows it.
+    private let approvalScreen = """
+    ❯ Tidy up the build folder
+    ⏺ Here is the plan:
+      1. Remove the stale artifacts
+      2. Rebuild
+      3. Run the tests
+      4. Report back
+      5. Stop
+    ────────────────────────────────────────
+     Bash command
+     Delete hello.txt from the test directory
+    ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+     rm /tmp/mm-perm-test/hello.txt
+    ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+     Do you want to proceed?
+     ❯ 1. Yes
+       2. Yes, and always allow access to /tmp/mm-perm-test from this project
+       3. Yes, and switch to auto mode · auto mode handles these prompts for you
+       4. No
+     Esc to cancel · Tab to amend
+    """
+
+    func testApprovalDialogListsItsOwnChoicesAndIgnoresNumberedTextAbove() {
+        let dialog = AgentWatcher.parseDialog(approvalScreen)
+        XCTAssertEqual(dialog.options.count, 4)
+        XCTAssertEqual(dialog.options.first, "Yes")
+        XCTAssertEqual(dialog.options.last, "No")
+        XCTAssertEqual(dialog.prompt, "Do you want to proceed?")
+        XCTAssertNil(dialog.typeOption)
+        XCTAssertTrue(dialog.hints.isEmpty)
+    }
+
+    func testApprovalShowsTheCommandAndTheScreenChoices() {
+        var agent = AgentWatcher.parse(try! JSONSerialization.data(withJSONObject: ["terminals": [
+            ["address": "t1", "agent": "claude-code", "status": "blocked", "where": "space / 1"],
+        ]]))[0]
+        agent.kind = "permission"
+        agent.message = "approve Bash: rm /tmp/mm-perm-test/hello.txt"
+        agent.screenOptions = AgentWatcher.parseDialog(approvalScreen).options
+        XCTAssertEqual(agent.permission?.tool, "Bash")
+        XCTAssertEqual(agent.permission?.detail, "rm /tmp/mm-perm-test/hello.txt")
+        let speech = agent.speech(full: true)
+        XCTAssertEqual(speech.text, "rm /tmp/mm-perm-test/hello.txt")
+        XCTAssertEqual(speech.options.count, 4)
+        XCTAssertEqual(speech.options[3], "No")
+        XCTAssertTrue(speech.options[1].hasSuffix("…"))   // long choices are shortened for the button
+    }
+
+    func testQuestionChoicesStillComeFromTheMessage() {
+        var agent = AgentWatcher.parse(try! JSONSerialization.data(withJSONObject: ["terminals": [
+            ["address": "t1", "agent": "claude-code", "status": "blocked", "where": "space / 1"],
+        ]]))[0]
+        agent.kind = "question"
+        agent.message = "answer: Keep it? (Yes (Recommended) · No)"
+        XCTAssertNil(agent.permission)
+        XCTAssertEqual(agent.speech.options, ["Yes (Recommended)", "No"])
+        XCTAssertEqual(agent.speech.text, "Keep it?")
+    }
 }

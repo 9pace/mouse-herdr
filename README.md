@@ -49,6 +49,9 @@ Click the GIF to watch **MouseHerdr: Welcome to My Herd** on YouTube
 - If it asked a question, a speech bubble shows it. Each offered choice is a button you can
   click to answer without leaving what you're doing; hovering a choice shows its
   explanation, and "Type your own answer…" opens a small text box.
+- When an agent asks to run something risky ("Do you want to proceed?"), the bubble shows
+  the exact command and the agent's own choices, such as Yes, Yes and don't ask again, and
+  No, so you can approve or refuse it from the mouse.
 - A knock in the thumb pad when an agent starts waiting on you, and a pulse when one
   finishes.
 
