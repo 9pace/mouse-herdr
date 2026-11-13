@@ -108,7 +108,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 let dialog = AgentWatcher.parseDialog(sampleScreen)
                 list[0].hints = dialog.hints
                 list[0].typeOption = dialog.typeOption
-                list[0].message = "answer: Question 4: Refunds over $500 currently go through in one step. Finance flagged three cases last quarter where a refund was issued twice because the first attempt timed out and the agent retried it. A second approver would catch those, but it adds a delay of up to a day for customers in regions where the approver is offline, and support has asked that we do not slow down the common case. Should refunds over $500 need a second approver, or keep the single-step flow we have today? (Second approver (Recommended) · Keep single step · Decide per region)"
+                if args.contains("--short") {
+                    // The one-line version of the question, so the whole bubble fits in the picture.
+                    list[0].kind = "question"
+                    list[0].message = AppDelegate.sampleAgents[0].message
+                } else {
+                    list[0].message = "answer: Question 4: Refunds over $500 currently go through in one step. Finance flagged three cases last quarter where a refund was issued twice because the first attempt timed out and the agent retried it. A second approver would catch those, but it adds a delay of up to a day for customers in regions where the approver is offline, and support has asked that we do not slow down the common case. Should refunds over $500 need a second approver, or keep the single-step flow we have today? (Second approver (Recommended) · Keep single step · Decide per region)"
+                }
                 // "--permission" shows a request to approve a risky command instead of a question.
                 if args.contains("--permission") {
                     list[0] = AppDelegate.sampleAgents[1]
@@ -124,16 +130,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 model.notice = .noApp
             } else if args.contains("--plain") {
                 model.highlighted = model.slices.dropFirst(2).first?.id
-            } else if let s = model.slices.first {
-                let big = args.contains("--expanded")
-                let m = RingModel.bubbleMetrics(for: s.agent, expanded: big)
-                let dx = CGFloat(cos(s.mid)), dy = CGFloat(sin(s.mid))
-                let reach = s.outer + 54 + abs(dx) * m.size.width / 2 + abs(dy) * m.size.height / 2
-                model.bubble = RingModel.Bubble(offset: CGSize(width: dx * reach, height: dy * reach), size: m.size,
-                                                toward: CGSize(width: -dx, height: -dy), textHeight: m.textHeight, optionCount: m.options, expanded: big)
-                model.hoveredOption = m.options > 1 ? 1 : nil
+            } else {
+                // "--highlight N|none", "--hover N|none" and "--sent N" pose the wheel for pictures.
+                func value(_ flag: String) -> String? {
+                    guard let j = args.firstIndex(of: flag), j + 1 < args.count else { return nil }
+                    return args[j + 1]
+                }
+                let pick = value("--highlight")
+                let slice = pick == "none" ? nil : model.slices.dropFirst(Int(pick ?? "0") ?? 0).first
+                model.highlighted = slice?.id
+                if let s = slice, !args.contains("--no-bubble") {
+                    let big = args.contains("--expanded")
+                    let m = RingModel.bubbleMetrics(for: s.agent, expanded: big)
+                    let dx = CGFloat(cos(s.mid)), dy = CGFloat(sin(s.mid))
+                    let reach = s.outer + 54 + abs(dx) * m.size.width / 2 + abs(dy) * m.size.height / 2
+                    model.bubble = RingModel.Bubble(offset: CGSize(width: dx * reach, height: dy * reach), size: m.size,
+                                                    toward: CGSize(width: -dx, height: -dy), textHeight: m.textHeight, optionCount: m.options, expanded: big)
+                    let hover = value("--hover")
+                    model.hoveredOption = hover == "none" ? nil : (hover.flatMap { Int($0) } ?? (m.options > 1 ? 1 : nil))
+                    model.sentOption = value("--sent").flatMap { Int($0) }
+                    // "--layout" prints where things are (points from the picture's top-left), for animating over it.
+                    if args.contains("--layout"), let b = model.bubble {
+                        let c = RingView.side / 2
+                        let origin = CGPoint(x: c + b.offset.width - b.size.width / 2, y: c + b.offset.height - b.size.height / 2)
+                        print("canvas \(Int(RingView.side)) bubble \(Int(origin.x)),\(Int(origin.y)) \(Int(b.size.width))x\(Int(b.size.height))")
+                        for k in 0..<b.optionCount {
+                            let r = RingModel.optionRect(k, in: b)
+                            print("option \(k) centre \(Int(origin.x + r.midX)),\(Int(origin.y + r.midY))")
+                        }
+                        for sl in model.slices {
+                            let rad = (sl.inner + sl.outer) / 2
+                            print("slice \(sl.agent.space) centre \(Int(c + CGFloat(cos(sl.mid)) * rad)),\(Int(c + CGFloat(sin(sl.mid)) * rad)) outer \(Int(sl.outer))")
+                        }
+                    }
+                }
             }
-            let view = ZStack { Color(white: 0.55); RingView(model: model) }.frame(width: RingView.side, height: RingView.side)
+            // "--clear" leaves the background transparent, for laying the wheel over other artwork.
+            let backdrop = args.contains("--clear") ? Color.clear : Color(white: 0.55)
+            let view = ZStack { backdrop; RingView(model: model) }.frame(width: RingView.side, height: RingView.side)
             let r = ImageRenderer(content: view)
             r.scale = 1.5
             if let cg = r.cgImage {
