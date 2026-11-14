@@ -21,6 +21,7 @@ From the checkout or worktree you are working in:
 ```bash
 swift test
 python3 scripts/test_release.py
+python3 scripts/test_sign_release.py
 SIGNING=adhoc ./build.sh
 MOUSEHERDR_TEST_BINARY=dist/MouseHerdr.app/Contents/MacOS/MouseHerdr python3 scripts/test_setup.py
 ```

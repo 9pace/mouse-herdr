@@ -178,18 +178,21 @@ for both Apple silicon and Intel.
 1. Download **MouseHerdr.zip** using the link above and unzip it.
 2. Quit any running MouseHerdr, then drag **MouseHerdr.app** to **Applications**. Replace
    the older copy if you are updating; your assignments remain saved.
-3. Open MouseHerdr from Applications. If macOS blocks it, go to **System Settings →
-   Privacy & Security**, find MouseHerdr under Security, and choose **Open Anyway**.
+3. Open MouseHerdr from Applications. macOS may ask you to confirm opening an app
+   downloaded from the internet.
 4. [Grant **Accessibility** and **Input Monitoring**](#grant-permissions), then quit and
    reopen MouseHerdr.
 
-These downloads are ad-hoc signed and **not notarized by Apple**. The Open Anyway step
-allows this particular app. Updates may require granting the permissions again; remove
-and re-add the Applications copy if necessary. Building from source creates a stable local
-signing identity that you can keep across updates.
+New releases are **Developer ID signed and notarized by Apple**, with the notarization
+ticket included in the app. Releases published before signing was enabled remain ad-hoc
+signed; check their release notes. When upgrading from one of those releases or a source
+build, you may need to remove and re-add the Applications copy in Accessibility and Input
+Monitoring because its signing identity has changed.
 
 To check a download, save `MouseHerdr.zip.sha256` from the same release beside the ZIP,
 then run `shasum -a 256 -c MouseHerdr.zip.sha256` in that directory.
+
+Maintainers: [release signing setup](docs/release-signing.md).
 
 ### Build from source
 

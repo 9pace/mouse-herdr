@@ -11,6 +11,8 @@ local.env
 *.pem
 *.p12
 *.pfx
+*.cer
+*.certSigningRequest
 *.keychain
 *.keychain-db
 *.log

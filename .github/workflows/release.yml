@@ -48,11 +48,13 @@ jobs:
         run: python3 scripts/release_plan.py
 
   release:
-    name: Build and publish
+    name: Build, sign, notarize and publish
     needs: plan
     if: needs.plan.outputs.publish == 'true'
+    # This environment only permits main. PR builds never receive signing credentials.
+    environment: release-signing
     runs-on: macos-26
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: write
     env:
@@ -73,6 +75,15 @@ jobs:
           ./build.sh
           lipo -archs dist/MouseHerdr.app/Contents/MacOS/MouseHerdr
 
+      - name: Sign with Developer ID and notarize with Apple
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: python3 scripts/sign_release.py
+
       - name: Package and verify the download
         run: |
           cd dist
@@ -84,6 +95,8 @@ jobs:
           mkdir verified
           ditto -x -k MouseHerdr.zip verified
           codesign --verify --strict --all-architectures --verbose=2 verified/MouseHerdr.app
+          xcrun stapler validate verified/MouseHerdr.app
+          spctl --assess --type execute verified/MouseHerdr.app
           python3 - <<'PY'
           import subprocess
           binary = "verified/MouseHerdr.app/Contents/MacOS/MouseHerdr"
@@ -120,19 +133,17 @@ jobs:
 
           1. Download **MouseHerdr.zip** from Assets below and unzip it.
           2. Quit any running MouseHerdr, then drag **MouseHerdr.app** to **Applications**, replacing an older copy if needed.
-          3. Open MouseHerdr from Applications. This app is ad-hoc signed and **not notarized by Apple**.
-             If macOS blocks it, go to **System Settings → Privacy & Security**, find MouseHerdr under Security,
-             and choose **Open Anyway** to allow this downloaded app.
+          3. Open MouseHerdr from Applications. This app is **Developer ID signed and notarized by Apple**.
+             macOS may ask you to confirm opening an app downloaded from the internet.
           4. Grant **Accessibility** and **Input Monitoring** in Privacy & Security.
              If MouseHerdr is missing from Input Monitoring, add the Applications copy with **+**.
              Quit and reopen MouseHerdr after granting the permissions.
 
           Runs on macOS 13 or later, on Apple silicon and Intel.
 
-          **Updating:** your assignments remain saved. Ad-hoc signing can require granting the two
-          permissions again after an update; remove and re-add the Applications copy if necessary.
-          [Building from source](https://github.com/${GITHUB_REPOSITORY}#build-from-source) creates a
-          stable local signing identity for subsequent rebuilds.
+          **Updating:** your assignments remain saved. When upgrading from an older ad-hoc-signed
+          release or a source build, you may need to remove and re-add the Applications copy in
+          Accessibility and Input Monitoring because its signing identity has changed.
 
           **Checksum:** download \`MouseHerdr.zip.sha256\` alongside the ZIP, then run
           \`shasum -a 256 -c MouseHerdr.zip.sha256\` in that directory.
