@@ -29,7 +29,9 @@ jobs:
       - name: Test agent handling, mouse profiles and mouse detection
         run: swift test
       - name: Check release selection
-        run: python3 scripts/test_release.py
+        run: |
+          python3 scripts/test_release.py
+          python3 scripts/test_sign_release.py
       - name: Build and verify the app bundle
         env:
           SIGNING: adhoc

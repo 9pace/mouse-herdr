@@ -11,7 +11,8 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
-BUILD_INPUTS = {"Package.swift", "Package.resolved", "build.sh", "VERSION"}
+BUILD_INPUTS = {"Package.swift", "Package.resolved", "build.sh", "VERSION",
+                "scripts/sign_release.py"}
 DOC_SUFFIXES = {".md", ".markdown", ".rst", ".adoc"}
 
 

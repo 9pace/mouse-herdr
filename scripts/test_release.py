@@ -78,7 +78,8 @@ class ReleaseChangesTests(unittest.TestCase):
         self.assertEqual(plan_release(head, "v1.0.2")["publish"], "false")
 
     def test_resource_and_build_changes_publish(self):
-        for path in ["Resources/AppIcon.png", "Package.swift", "Package.resolved", "build.sh", "VERSION"]:
+        for path in ["Resources/AppIcon.png", "Package.swift", "Package.resolved", "build.sh",
+                     "scripts/sign_release.py", "VERSION"]:
             with self.subTest(path=path):
                 self.git("reset", "--hard", "v1.0.1")
                 self.write(path, "1.1\n" if path == "VERSION" else "new build input\n")
