@@ -95,7 +95,7 @@ jobs:
           test "$(plutil -extract CFBundleShortVersionString raw verified/MouseHerdr.app/Contents/Info.plist)" = "$VERSION"
           test "$(plutil -extract CFBundleVersion raw verified/MouseHerdr.app/Contents/Info.plist)" = "$BUILD_NUMBER"
 
-      - name: Check the packaged app with optional Herdr dependencies missing or failing
+      - name: Check the packaged app with Herdr missing or failing, and how it recognises mice
         env:
           MOUSEHERDR_TEST_BINARY: dist/verified/MouseHerdr.app/Contents/MacOS/MouseHerdr
         run: python3 scripts/test_setup.py

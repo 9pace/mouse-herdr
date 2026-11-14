@@ -8,18 +8,24 @@ struct ContentView: View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
                 header
-                if setupShowing {
+                if noticeShowing, let notice = state.mouseNotice {
+                    MouseNoticeBanner(notice: notice) { state.answerNotice(primary: $0) }
+                        .padding(.horizontal, 24).padding(.top, 4)
+                } else if setupShowing {
                     permissions.padding(.horizontal, 24).padding(.top, 4)
                 }
                 switch state.tab {
                 case .agents:
                     AgentsPage(state: state)
                 case .buttons:
+                    let scale: CGFloat = setupShowing || noticeShowing ? 0.84 : 1
                     Spacer(minLength: 0)
                     MouseView(state: state)
-                        .scaleEffect(setupShowing ? 0.84 : 1)
-                        .frame(width: state.profile.art.size.width * (setupShowing ? 0.84 : 1),
-                               height: state.profile.art.size.height * (setupShowing ? 0.84 : 1))
+                        .scaleEffect(scale)
+                        .frame(width: state.profile.art.size.width * scale,
+                               height: state.profile.art.size.height * scale)
+                        // The corner under the right-hand labels is empty on every mouse.
+                        .overlay(alignment: .bottomTrailing) { MousePlate(state: state).padding(.trailing, 6 * scale) }
                     Spacer(minLength: 0)
                 case .feel:
                     FeelPage(state: state)
@@ -33,7 +39,8 @@ struct ContentView: View {
             Group {
                 switch state.tab {
                 case .agents: AgentSidePanel(state: state)
-                case .buttons: DetailPanel(state: state)
+                case .buttons:
+                    if state.choosingMouse { MousePickerPanel(state: state) } else { DetailPanel(state: state) }
                 case .feel: HapticsSidePanel(state: state)
                 }
             }
@@ -44,7 +51,16 @@ struct ContentView: View {
         .frame(width: 1010, height: 690)
     }
 
-    private var setupShowing: Bool { !state.accessibilityOK || state.needsRelaunch || state.hidStatus != .connected }
+    /// A permission is missing. Input Monitoring only counts for a mouse the direct link can reach.
+    private var setupShowing: Bool {
+        if !state.accessibilityOK || state.needsRelaunch { return true }
+        guard state.wantsDirectLink, state.hidStatus != .connected else { return false }
+        // With the permission given and no mouse connected, there is nothing left to set up.
+        return !(state.inputMonitoringOK && state.mouse == nil)
+    }
+
+    /// A newly found mouse is being pointed out. It takes the place of the optional permission until it is answered.
+    private var noticeShowing: Bool { state.mouseNotice != nil && state.accessibilityOK && !state.needsRelaunch }
 
     private var backdrop: some View {
         LinearGradient(
@@ -94,6 +110,7 @@ struct ContentView: View {
         let waiting = tab == .agents ? state.agentList.filter { $0.needsYou }.count : 0
         return Button {
             state.recording = false
+            state.choosingMouse = false
             state.tab = tab
             if tab == .agents { state.refreshAgentList() }
         } label: {
@@ -117,9 +134,10 @@ struct ContentView: View {
     }
 
     private var statusPill: some View {
-        let connected = state.hidStatus == .connected
+        // The battery comes over the direct link, so it is only shown for the mouse on it.
+        let connected = state.hidStatus == .connected && state.linkFollowed
         let text: String = !state.accessibilityOK ? "Needs permission"
-            : connected ? (state.deviceName ?? "Mouse connected") : "Ready"
+            : state.mouse != nil ? state.mouseTitle : "No mouse connected"
         return HStack(spacing: 7) {
             Circle().fill(state.accessibilityOK ? Color.green : Color.orange).frame(width: 8, height: 8)
             Text(text).font(.system(size: 12, weight: .medium))
@@ -143,7 +161,9 @@ struct ContentView: View {
 
     private var permissions: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(state.needsRelaunch ? "One more step" : state.accessibilityOK ? "One more permission for hold-to-drag" : "Two quick permissions and you're set")
+            Text(state.needsRelaunch ? "One more step"
+                 : state.accessibilityOK ? (state.profile.hasHaptics ? "One more permission for hold-to-drag" : "One more permission for this mouse's extra buttons")
+                 : state.wantsDirectLink ? "Two quick permissions and you're set" : "One quick permission and you're set")
                 .font(.system(size: 13, weight: .semibold))
             if state.needsRelaunch {
                 HStack {
@@ -157,10 +177,13 @@ struct ContentView: View {
                     ok: state.accessibilityOK, title: "Accessibility",
                     why: "Lets MouseHerdr press shortcuts and move windows for you.",
                     action: state.requestAccessibility)
-                permissionRow(
-                    ok: state.inputMonitoringOK, title: "Input Monitoring",
-                    why: state.profile.directLinkWhy + " If MouseHerdr isn't in the list, click + there and pick it from Applications.",
-                    action: state.requestInputMonitoring)
+                // Only a mouse the direct link can reach has a use for the second permission.
+                if state.wantsDirectLink {
+                    permissionRow(
+                        ok: state.inputMonitoringOK, title: "Input Monitoring",
+                        why: state.profile.directLinkWhy + " If MouseHerdr isn't in the list, click + there and pick it from Applications.",
+                        action: state.requestInputMonitoring)
+                }
             }
         }
         .padding(14)
@@ -579,10 +602,16 @@ struct DetailPanel: View {
                         .font(.system(size: 11.5)).foregroundStyle(Palette.accent)
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.top, 2)
-                    if needsDirectLink && state.accessibilityOK && state.hidStatus != .connected {
+                    if needsDirectLink && state.wantsDirectLink && state.accessibilityOK && state.hidStatus != .connected {
                         Button("Open Input Monitoring settings…") { state.requestInputMonitoring() }
                             .controlSize(.small).padding(.top, 2)
                     }
+                } else if let note = state.profile.note {
+                    // Something about this mouse as a whole, such as having no spare button.
+                    Label(note, systemImage: "info.circle")
+                        .font(.system(size: 11.5)).foregroundStyle(Palette.accent)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 2)
                 }
                 if state.hasGestures(state.selected) {
                     Picker("", selection: $state.gesturePart) {
@@ -651,6 +680,16 @@ struct DetailPanel: View {
 
     private var unavailableText: String {
         if !state.accessibilityOK { return "Works once Accessibility is allowed (see the left side)." }
+        if needsDirectLink && !state.wantsDirectLink {
+            return "This button only answers over Bluetooth. Pair the mouse by Bluetooth instead of using its USB receiver or cable."
+        }
+        if !needsDirectLink {
+            // An ordinary button, so the direct link has nothing to do with it.
+            return "MouseHerdr isn't hearing this mouse's buttons yet. It starts listening a moment after Accessibility is allowed. If this stays, quit and reopen MouseHerdr."
+        }
+        if let other = state.linkElsewhere {
+            return "MouseHerdr can talk directly to one Logitech mouse at a time, and right now that is your \(other). Switch that one off to use this button."
+        }
         if state.hidStatus != .connected {
             return "This one button also needs Input Monitoring. In the settings list, switch MouseHerdr on — if it isn't listed, click + and pick MouseHerdr from Applications."
         }

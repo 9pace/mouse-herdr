@@ -182,6 +182,13 @@ final class HIDPP {
         guard device == nil else { return }
         let product = IOHIDDeviceGetProperty(dev, kIOHIDProductKey as CFString) as? String ?? "Logitech mouse"
         let productID = IOHIDDeviceGetProperty(dev, kIOHIDProductIDKey as CFString) as? Int ?? 0
+        // Logitech's Bluetooth keyboards offer the same HID++ collection. Leave the link free for a mouse.
+        if let pairs = IOHIDDeviceGetProperty(dev, kIOHIDDeviceUsagePairsKey as CFString) as? [[String: Any]],
+           !pairs.contains(where: { ($0[kIOHIDDeviceUsagePageKey] as? Int) == kHIDPage_GenericDesktop
+                                    && ($0[kIOHIDDeviceUsageKey] as? Int) == kHIDUsage_GD_Mouse }) {
+            Log.write("skipping \(product) (product id \(String(format: "0x%04x", productID))): not a mouse")
+            return
+        }
         let open = IOHIDDeviceOpen(dev, IOOptionBits(kIOHIDOptionsTypeNone))
         Log.write("found \(product) (product id \(String(format: "0x%04x", productID))), open: \(hex(open))")
         guard open == kIOReturnSuccess else {

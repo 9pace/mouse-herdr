@@ -101,5 +101,6 @@ extension MouseProfile {
                 p.addQuadCurve(to: CGPoint(x: 441, y: 258), control: CGPoint(x: 350, y: 232))
                 return p
             }(),
-            shadow: CGRect(x: 210, y: 448, width: 250, height: 60)))
+            shadow: CGRect(x: 210, y: 448, width: 250, height: 60)),
+        tested: true)
 }

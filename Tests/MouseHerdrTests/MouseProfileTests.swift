@@ -16,7 +16,7 @@ final class MouseProfileTests: XCTestCase {
     }
 
     func testProfilesHaveUnambiguousControlsAndUsableDefaults() {
-        for profile in MouseProfile.all + [.generic] {
+        for profile in MouseProfile.all + MouseProfile.fallbacks {
             let slots = profile.controls.map(\.slot)
             XCTAssertEqual(Set(slots).count, slots.count, profile.id)
             XCTAssertNotNil(profile.control(profile.firstSelected), profile.id)

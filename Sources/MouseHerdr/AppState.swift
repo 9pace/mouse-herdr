@@ -131,15 +131,24 @@ final class WindowDragger {
 }
 
 final class AppState: ObservableObject {
-    /// The mouse we believe is connected: its controls, picture and defaults.
-    @Published private(set) var profile = MouseProfile.initial
-    @Published var assignments: [Slot: Action] = ConfigStore.load(defaults: MouseProfile.initial.defaults)
-    @Published var selected: Slot = MouseProfile.initial.firstSelected
+    /// The mouse being followed: its controls, picture and defaults.
+    @Published private(set) var profile: MouseProfile
+    @Published var assignments: [Slot: Action]
+    @Published var selected: Slot
+    /// The mice connected now, best guess first, and the one of them being followed.
+    @Published private(set) var mice: [MouseDevice] = []
+    @Published private(set) var mouse: MouseDevice?
+    /// Something to say about a mouse that was just found. The window shows it, or the menu bar when the window is closed.
+    @Published var mouseNotice: MouseNotice?
+    /// The Buttons page is showing the list of mice instead of a button's actions.
+    @Published var choosingMouse = false
+    @Published var mouseSearch = ""
+    /// What the last "Detect again" found, in words.
+    @Published private(set) var detectResult: String?
     @Published var gesturePart: Slot = .gesture
     @Published var recording = false
 
     @Published var hidStatus: HIDPP.Status = .searching
-    @Published var deviceName: String?
     @Published var battery: Int?
     @Published var charging = false
     @Published var accessibilityOK = false
@@ -183,7 +192,13 @@ final class AppState: ObservableObject {
     /// The agents as last seen, with their questions, for the Agents page.
     @Published var agentList: [AgentInfo] = []
     /// Set by the window; the Agents page only keeps itself fresh while someone can see it.
-    var windowVisible = false { didSet { if windowVisible { refreshAgentList() } } }
+    var windowVisible = false {
+        didSet {
+            guard windowVisible else { return }
+            refreshAgentList()
+            noticeSeen()        // a notice that was waiting is now a banner in the window
+        }
+    }
     private var listFetching = false
     @Published var herdr = HerdrStatus.unknown
     @Published var herdrApp = true
@@ -194,6 +209,29 @@ final class AppState: ObservableObject {
 
     let hid = HIDPP()
     let tap = ButtonTap()
+    let detector = MouseDetector()
+    /// Set by the app: opens the window, for a notice's button that leads into it.
+    var openWindow: (() -> Void)?
+    private var memory: MouseMemory
+    /// Whether this Mac has never run MouseHerdr before; decides what is shown before any mouse is found.
+    private let firstRun: Bool
+    private var started = false
+    /// Every pointing device the detector reports, before trackpads and the like are left out.
+    private var detected: [MouseDevice] = []
+    /// What the direct link is talking to, once it has introduced itself.
+    private var link: (name: String, productID: Int, controls: [HIDPP.Control])?
+    /// The link has only just come up, so what its mouse is holding from before is not known yet.
+    private var linkArrived = false
+    /// The controls last captured on the link's mouse. Kept while the link is down: the mouse is
+    /// told its captures again as it reconnects, whoever is being followed by then.
+    private var captured: Set<UInt16> = []
+    /// The profile the link's controls were last tied to.
+    private var boundProfile: String?
+    /// When the mouse being followed took over, how the one before it ranked, and whether this
+    /// one ranks below it and so may only be standing in while that one reconnects.
+    private var followedSince = Date()
+    private var previousTier: Int
+    private var standIn = false
     let dragger = WindowDragger()
     let feeler = HoverFeeler()
     let agents = AgentWatcher()
@@ -229,8 +267,22 @@ final class AppState: ObservableObject {
     private var dragPressed = Date.distantPast
     private var gestureStart = CGPoint.zero
     private var gestureTimer: Timer?
-    /// Controls every Logitech mouse reports (left, right, middle, back, forward, virtual gesture button).
-    private static let standardCIDs: Set<UInt16> = [0x0050, 0x0051, 0x0052, 0x0053, 0x0056, 0x00D7]
+
+    init() {
+        var memory = MouseMemory.load()
+        let firstRun = !UserDefaults.standard.bool(forKey: "didFirstRun")
+        // A Mac that ran MouseHerdr before it knew other mice: there, every mouse was an MX Master 4.
+        if !firstRun && !MouseMemory.exists() { memory.boltCarriesMXMaster4 = true }
+        // Until a mouse is found, show the one that was in use last.
+        let profile = MouseChooser.profile(for: nil, memory: memory, firstRun: firstRun)
+        self.memory = memory
+        self.firstRun = firstRun
+        self.profile = profile
+        // The mouse this Mac had last is the one to expect back; a Mac new to MouseHerdr expects none.
+        previousTier = firstRun && memory.last == nil ? -1 : MouseSetup.tier(of: profile)
+        assignments = ConfigStore.load(for: profile)
+        selected = profile.firstSelected
+    }
 
     /// The slot the right-hand panel is editing.
     var editing: Slot { hasGestures(selected) && gesturePart.isSwipe ? gesturePart : selected }
@@ -240,10 +292,185 @@ final class AppState: ObservableObject {
     /// Switch to another mouse: its picture, controls and defaults.
     func use(_ p: MouseProfile) {
         guard p.id != profile.id else { return }
-        Log.write("profile: \(p.name)")
+        Log.write("profile: \(p.fullName)")
+        // Whatever was being held or recorded belonged to the other mouse.
+        recording = false
+        gestureTimer?.invalidate(); gestureTimer = nil
+        gestureHeld = false
+        ringPress = false
+        stickyDrag = false
+        if dragger.isDragging { dragger.end(snap: false) }
         profile = p
-        assignments = ConfigStore.load(defaults: p.defaults)
+        assignments = ConfigStore.load(for: p)
         if p.control(selected) == nil { selected = p.firstSelected }
+        gesturePart = .gesture
+    }
+
+    // MARK: Which mouse
+
+    /// What to call the mouse being followed, and a few words on how it was found.
+    var mouseTitle: String { MouseSetup.title(device: mouse, profile: profile) }
+    var mouseSubtitle: String { MouseSetup.subtitle(device: mouse, profile: profile, pickedByHand: modelPickedByHand) }
+
+    /// The model was picked from the list, not worked out from the device.
+    var modelPickedByHand: Bool { memory.chosen[mouse?.key ?? MouseChooser.noDevice] != nil }
+
+    /// The direct link is talking to the mouse being followed.
+    var linkFollowed: Bool {
+        guard let link, let mouse else { return false }
+        return mouse.vendorID == MouseProfile.logitech && mouse.productID == link.productID
+    }
+
+    /// This mouse has controls that only answer over the direct link, and it is connected in a way that can carry it.
+    var wantsDirectLink: Bool {
+        guard profile.usesDirectLink else { return false }
+        guard let mouse else { return true }
+        return mouse.vendorID == MouseProfile.logitech && mouse.isBluetooth
+    }
+
+    /// The connected mice changed, or the direct link found out what it is talking to.
+    private func miceChanged() {
+        var all = detected
+        if let link {
+            let isLinked: (MouseDevice) -> Bool = { $0.vendorID == MouseProfile.logitech && $0.productID == link.productID }
+            if let i = all.firstIndex(where: isLinked) {
+                // The name the mouse gives over the link is its model, even if it was renamed in
+                // Bluetooth settings. Go by that when the name macOS has says nothing.
+                if all[i].recognised == nil, MouseProfile.matching(vendor: MouseProfile.logitech, product: link.productID, name: link.name) != nil {
+                    all[i].name = link.name
+                }
+            } else {
+                // The mouse on the direct link counts even if the scan missed it.
+                all.append(MouseDevice(vendorID: MouseProfile.logitech, productID: link.productID, name: link.name,
+                                       maker: "Logitech", transport: "Bluetooth Low Energy"))
+            }
+        }
+        let list = MouseChooser.candidates(all)
+        if list != mice {
+            mice = list
+            Log.write("mice: " + (list.isEmpty ? "none" : list.map { "\($0.name) [\($0.key), \($0.connection), \($0.buttons) buttons]" }.joined(separator: "; ")))
+        }
+        follow()
+    }
+
+    /// Work out which mouse to follow and switch to its profile.
+    private func follow() {
+        let next = MouseChooser.active(among: mice, pinned: memory.pinned)
+        if next?.key != mouse?.key {
+            // One that ranks below the mouse before it may only be filling in while that one reconnects.
+            if let old = mouse { previousTier = MouseChooser.tier(old) }
+            standIn = next.map { $0.key != memory.pinned && MouseSetup.isStandIn($0, after: previousTier) } ?? false
+            followedSince = Date()
+            Log.write("following: \(next.map { "\($0.name) [\($0.key)]" } ?? "no mouse")\(standIn ? " (standing in)" : "")")
+        }
+        if next != mouse { mouse = next }
+        let p = MouseChooser.profile(for: next, memory: memory, firstRun: firstRun)
+        use(p)
+        if next != nil {
+            if memory.last != p.id { memory.last = p.id; saveMemory() }
+            // From its first turn a mouse has a file of its own, so later changes to the MX Master 4 don't reach it.
+            if started { ConfigStore.settle(p) }
+        }
+        bindLink()
+        // A notice about a mouse that has gone, or that is no longer the one it describes, is withdrawn.
+        if let notice = mouseNotice, !MouseSetup.stillTrue(notice, following: next, among: mice) { mouseNotice = nil }
+        introduce()
+    }
+
+    private func saveMemory() {
+        // Snapshots and other developer commands look but never write.
+        if started { memory.save() }
+    }
+
+    /// Point out a mouse that hasn't been seen before: what it is and what opens the agent wheel on it.
+    private func introduce() {
+        // One notice at a time, and "press it to try" only once presses reach us.
+        guard started, mouseNotice == nil, accessibilityOK, tap.isRunning else { return }
+        // Not while the mouse being followed may be about to give way again.
+        guard Date().timeIntervalSince(followedSince) >= MouseSetup.settleTime(standIn: standIn) else { return }
+        guard let notice = MouseSetup.nextNotice(following: mouse, profile: profile, among: mice, triggers: wheelTriggers,
+                                                 memory: memory, byChoice: followingByChoice) else { return }
+        mouseNotice = notice
+        Log.write("mouse notice: \(notice.title) [\(notice.device.key)]")
+        // In the window it is a banner nobody can miss. Under the menu bar icon it has to stay up a while first.
+        if windowVisible { noticeSeen() }
+    }
+
+    /// The notice that is showing has been seen, so it need not be shown again another day.
+    func noticeSeen() {
+        guard let notice = mouseNotice else { return }
+        let before = memory
+        MouseSetup.acknowledge(notice, in: &memory)
+        if memory != before { saveMemory() }
+    }
+
+    /// Follow one of the connected mice from now on, by the person's choice.
+    func follow(_ device: MouseDevice) {
+        memory.pinned = device.key
+        saveMemory()
+        mouseNotice = nil
+        follow()
+        // Asked for, so there is nothing to wait for before saying what it does.
+        standIn = false
+        followedSince = .distantPast
+        introduce()
+    }
+
+    /// Go back to following whichever mouse MouseHerdr thinks best.
+    func followAutomatically() {
+        memory.pinned = nil
+        saveMemory()
+        follow()
+    }
+
+    /// The mouse being followed was picked from the connected ones, not chosen by MouseHerdr.
+    var followingByChoice: Bool { mouse != nil && mouse?.key == memory.pinned }
+
+    /// Use a model from the list for the mouse being followed, whatever it says about itself.
+    func choose(_ model: MouseProfile) {
+        memory.chosen[mouse?.key ?? MouseChooser.noDevice] = model.id
+        saveMemory()
+        detectResult = nil
+        follow()
+    }
+
+    /// Forget what was picked by hand and look at what is connected again.
+    func detectMouse() {
+        memory.pinned = nil
+        memory.chosen[MouseChooser.noDevice] = nil
+        for device in mice { memory.chosen[device.key] = nil }
+        saveMemory()
+        detector.rescan()
+        detected = detector.devices
+        miceChanged()
+        detectResult = mouse.map { _ in "Found your \(mouseTitle)." }
+            ?? "No mouse found. Trackpads don't count. Switch your mouse on or plug it in: it is picked up the moment it connects."
+    }
+
+    /// The notice's main button, or its other one.
+    func answerNotice(primary: Bool) {
+        guard let notice = mouseNotice else { return }
+        noticeSeen()
+        mouseNotice = nil
+        switch (notice.kind, primary) {
+        case (.alsoConnected, true): follow(notice.device)
+        case (.chooseButton, true), (.ready, false):
+            // Open the Buttons page on the button in question.
+            tab = .buttons
+            choosingMouse = false
+            if let control = profile.wheelControl ?? profile.controls.first { selected = control.slot }
+            openWindow?()
+        default: break
+        }
+    }
+
+    /// Developer aid: stand in for a connected mouse when drawing the window to a picture.
+    func pose(_ p: MouseProfile, as device: MouseDevice?, among others: [MouseDevice] = []) {
+        use(p)
+        mouse = device
+        mice = MouseChooser.candidates((device.map { [$0] } ?? []) + others)
+        // A mouse with a direct link is shown as if it were up, so its battery level appears.
+        link = device.flatMap { $0.vendorID == MouseProfile.logitech && p.usesDirectLink ? ($0.name, $0.productID, []) : nil }
     }
 
     /// The control behind a button number macOS reports.
@@ -254,6 +481,9 @@ final class AppState: ObservableObject {
     // MARK: Start
 
     func start() {
+        started = true
+        // Written at the first start, so that whether this Mac goes back to before other mice is settled once.
+        if !MouseMemory.exists() { memory.save() }
         refreshPermissions()
         launchAtLogin = SMAppService.mainApp.status == .enabled
         let defaults = UserDefaults.standard
@@ -338,7 +568,11 @@ final class AppState: ObservableObject {
         hid.onStatus = { [weak self] s in
             guard let self else { return }
             self.hidStatus = s
-            if s != .connected { self.hidHaptics = false; self.hapticsAvailable = false; self.applyFeel(); self.directLink = false; self.stickyDrag = false; self.pressed = []; self.cidForSlot = [:]; self.slotForCID = [:]; self.updateAvailability() }
+            if s != .connected {
+                self.hidHaptics = false; self.hapticsAvailable = false; self.applyFeel(); self.directLink = false; self.stickyDrag = false; self.pressed = []; self.cidForSlot = [:]; self.slotForCID = [:]; self.updateAvailability()
+                // The link is gone, and with it what it said about itself.
+                if self.link != nil { self.link = nil; self.miceChanged() }
+            }
             if s == .connected { self.needsRelaunch = false }
         }
         hid.onDevice = { [weak self] name, productID, controls in self?.deviceReady(name, productID, controls) }
@@ -347,10 +581,17 @@ final class AppState: ObservableObject {
         hid.onHaptics = { [weak self] ok in
             guard let self else { return }
             self.hidHaptics = ok
-            self.hapticsAvailable = ok && self.profile.hasHaptics
+            self.hapticsAvailable = self.hapticsReachable
             self.applyFeel()
         }
         hid.onBattery = { [weak self] p, c in self?.battery = p; self?.charging = c }
+        // Find out which mouse is connected before the direct link starts, so the right picture is there from the start.
+        detector.onChange = { [weak self] devices in
+            guard let self else { return }
+            self.detected = devices
+            self.miceChanged()
+        }
+        detector.start()
         hid.start()
         updateAvailability()
 
@@ -371,6 +612,7 @@ final class AppState: ObservableObject {
         if ticks % 2 == 0 { watchAgents() }
         refreshAgentList()
         if accessibilityOK && !tap.isRunning { tap.start(); updateAvailability(); applyFeel() }
+        introduce()     // a new mouse is pointed out once its presses can reach us
         if hidStatus == .notPermitted {
             // macOS sometimes refuses the first attempt right after launch, so keep trying quietly.
             grantRestarts += 1
@@ -491,24 +733,15 @@ final class AppState: ObservableObject {
 
     /// Plain-language list of what opens the wheel on this mouse right now.
     var wheelTriggers: [String] {
-        var out: [String] = []
-        if ringOnTap, let pad = profile.control(.thumbPanel), action(.thumbPanel).isDrag {
-            out.append("A quick tap on the \(pad.title.lowercased())")
-        }
-        for c in profile.controls {
-            if action(c.slot).kind == "agentWheel" { out.append("The \(c.title.lowercased())") }
-            if c.gestures {
-                for s in Slot.swipes where action(s).kind == "agentWheel" {
-                    out.append("\(c.title): \(s.swipeTitle.lowercased())")
-                }
-            }
-        }
-        return out
+        MouseSetup.triggers(profile: profile, assignments: assignments, ringOnTap: ringOnTap)
     }
 
     /// Run an action; the agent wheel is ours, everything else is a key press or similar.
     private func perform(_ a: Action) {
-        if a.kind == "agentWheel" { toggleWheel() } else { ActionRunner.run(a) }
+        guard a.kind == "agentWheel" else { ActionRunner.run(a); return }
+        // Trying the button is what the notice asked for, so it has done its job.
+        if mouseNotice?.kind == .ready { noticeSeen(); mouseNotice = nil }
+        toggleWheel()
     }
 
     /// Look again now; the settings popover asks for this when it opens.
@@ -594,13 +827,13 @@ final class AppState: ObservableObject {
 
     func assign(_ action: Action, to slot: Slot) {
         assignments[slot] = action
-        ConfigStore.save(assignments)
+        ConfigStore.save(assignments, for: profile)
         pushDiversions()
     }
 
     func resetAll() {
         assignments = profile.defaults
-        ConfigStore.save(assignments)
+        ConfigStore.save(assignments, for: profile)
         pushDiversions()
     }
 
@@ -613,39 +846,67 @@ final class AppState: ObservableObject {
         !action(slot).isDefault || Slot.swipes.contains { !action($0).isNothing && !action($0).isDefault }
     }
 
-    private func pushDiversions() {
+    /// Tell the mouse which controls to send our way. `releasing` holds controls that are handed
+    /// back: captured for another profile, or held by a mouse that is no longer being followed.
+    private func pushDiversions(releasing: Set<UInt16> = []) {
         var diverts: [UInt16: Bool] = [:]
         for control in profile.controls {
             guard let cid = cidForSlot[control.slot], isRemapped(control.slot) else { continue }
             diverts[cid] = control.gestures && rawXYCapable.contains(cid)   // raw XY only where movement matters
         }
-        hid.setDiversions(diverts, managed: Array(cidForSlot.values))
+        hid.setDiversions(diverts, managed: Array(releasing.union(cidForSlot.values)))
+        captured = Set(cidForSlot.values)
     }
 
     // MARK: Device
 
+    /// The direct link has learned what it is talking to.
     private func deviceReady(_ name: String, _ productID: Int, _ controls: [HIDPP.Control]) {
-        deviceName = name
-        use(MouseProfile.matching(productID: productID, name: name))
-        let haptics = hidHaptics && profile.hasHaptics
-        if haptics != hapticsAvailable { hapticsAvailable = haptics; applyFeel() }
+        link = (name, productID, controls)
+        linkArrived = true
+        miceChanged()       // follows the best mouse, then ties the link to it if it is that mouse
+    }
+
+    /// The haptic motor can be used: the mouse on the direct link has one, and it is the mouse being followed.
+    private var hapticsReachable: Bool { hidHaptics && profile.hasHaptics && (link == nil || linkFollowed) }
+
+    /// The mouse the direct link is talking to, when that is not the one being followed. The link reaches one mouse at a time.
+    var linkElsewhere: String? { link != nil && !linkFollowed ? link?.name : nil }
+
+    /// Tie the profile's HID++ controls to what the mouse on the direct link reports, if that is the
+    /// mouse being followed. If it is another mouse, hand back whatever it is holding for us.
+    private func bindLink() {
+        let before = cidForSlot
+        let followed = linkFollowed
+        let arrived = linkArrived
+        linkArrived = false
         cidForSlot = [:]
-        rawXYCapable = Set(controls.filter { $0.rawXY }.map { $0.cid })
-        let usable = controls.filter { $0.divertable && !$0.isVirtual }
-        let ids = Set(usable.map { $0.cid })
-        for control in profile.controls {
-            if let cid = control.cid, ids.contains(cid) { cidForSlot[control.slot] = cid }
-        }
-        // A control that asked for it gets whichever capturable control is left once the known ones are accounted for.
-        let known = Self.standardCIDs.union(profile.controls.compactMap { $0.cid })
-        if let orphan = profile.controls.first(where: { $0.orAnyUnlistedControl && cidForSlot[$0.slot] == nil }),
-           let extra = usable.first(where: { !known.contains($0.cid) }) {
-            cidForSlot[orphan.slot] = extra.cid
+        rawXYCapable = []
+        if let link, followed {
+            rawXYCapable = Set(link.controls.filter { $0.rawXY }.map { $0.cid })
+            cidForSlot = profile.captures(among: link.controls)
         }
         slotForCID = Dictionary(cidForSlot.map { ($0.value, $0.key) }, uniquingKeysWith: { a, _ in a })
-        Log.write("slots: " + cidForSlot.map { "\($0.key.rawValue)=\(String(format: "0x%04x", $0.value))" }.sorted().joined(separator: " "))
+        if cidForSlot != before {
+            Log.write("slots: " + (cidForSlot.isEmpty ? "none" : cidForSlot.map { "\($0.key.rawValue)=\(String(format: "0x%04x", $0.value))" }.sorted().joined(separator: " ")))
+        }
+        let haptics = hapticsReachable
+        if haptics != hapticsAvailable { hapticsAvailable = haptics; applyFeel() }
         updateAvailability()
-        pushDiversions()
+        if let link {
+            let release = MouseChooser.handBack(captured: captured, wanted: Set(cidForSlot.values),
+                                                followed: followed, arrived: arrived, reported: link.controls)
+            // The mouse being followed is told what to capture when it has just connected or when
+            // that has changed. Any other mouse on the link is only told to let go.
+            let changed = arrived || cidForSlot != before || boundProfile != profile.id
+            if !release.isEmpty || (followed && changed) {
+                if !release.isEmpty {
+                    Log.write("handing back to \(link.name): " + release.sorted().map { String(format: "0x%04x", $0) }.joined(separator: " "))
+                }
+                pushDiversions(releasing: release)
+            }
+            boundProfile = followed ? profile.id : nil
+        }
         directLink = profile.controls.contains { $0.pulsesOverTap && cidForSlot[$0.slot] != nil }
     }
 

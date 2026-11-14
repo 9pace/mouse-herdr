@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 @main
@@ -42,6 +43,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             print("Herdr app: \(AgentWatcher.herdrAppInstalled() ? "installed" : "not installed")")
             print(String(format: "took %.1f seconds", Date().timeIntervalSince(started)))
             exit(0)
+        }
+
+        // Developer aid: the mice MouseHerdr recognises, one per line.
+        if args.contains("--list-mice") {
+            for p in MouseProfile.all + MouseProfile.fallbacks { print("\(p.id)\t\(p.brand)\t\(p.name)") }
+            exit(0)
+        }
+
+        // Developer aid: which profile a device with this vendor:product id (in hexadecimal) and name
+        // would get. "--buttons N" says how many buttons it declares, which decides the layout of a
+        // mouse that is not in the list.
+        if let i = args.firstIndex(of: "--identify") {
+            let ids = i + 1 < args.count ? args[i + 1].split(separator: ":").map { Int($0, radix: 16) } : []
+            guard ids.count == 2, let vendor = ids[0], let product = ids[1] else {
+                print("use --identify <vendor>:<product> [name], with the ids in hexadecimal, such as 045e:00cb")
+                exit(2)
+            }
+            var device = MouseDevice(vendorID: vendor, productID: product)
+            if i + 2 < args.count, !args[i + 2].hasPrefix("--") { device.name = args[i + 2] }
+            if let j = args.firstIndex(of: "--buttons"), j + 1 < args.count { device.buttons = Int(args[j + 1]) ?? 0 }
+            print(AppDelegate.describe(device))
+            exit(0)
+        }
+
+        // Developer aid: the mice connected to this Mac right now and the one MouseHerdr would follow,
+        // using the same code as the running app. It reads what the devices say about themselves and
+        // opens none of them. "--watch N" keeps looking for N seconds and reports each change.
+        if args.contains("--detect-mice") {
+            func report(_ devices: [MouseDevice]) {
+                let list = MouseChooser.candidates(devices)
+                let followed = MouseChooser.active(among: list, pinned: nil)
+                print(list.isEmpty ? "No mouse found." : "Mice connected:")
+                for d in list {
+                    print("\(d.key == followed?.key ? "*" : " ") \(AppDelegate.describe(d)) [\(d.key), \(d.connection), \(d.buttons) buttons, calls itself \"\(d.name)\"]")
+                }
+                let ignored = Set(devices.filter { $0.kind == .ignored }.map(\.name)).sorted()
+                if !ignored.isEmpty { print("Not counted as mice: " + ignored.joined(separator: ", ")) }
+                if let followed {
+                    let profile = MouseChooser.profile(for: followed, memory: MouseMemory(), firstRun: true)
+                    print("MouseHerdr would follow: \(MouseSetup.title(device: followed, profile: profile))")
+                }
+                fflush(stdout)
+            }
+            if let j = args.firstIndex(of: "--watch"), j + 1 < args.count, let seconds = Double(args[j + 1]) {
+                print("Watching for \(Int(seconds)) seconds. Connect or disconnect a mouse.\n")
+                let detector = MouseDetector()
+                detector.onChange = { report($0); print(""); fflush(stdout) }
+                detector.start()
+                // Keep the detector until the wait is over; nothing else refers to it.
+                withExtendedLifetime(detector) {
+                    RunLoop.main.run(until: Date().addingTimeInterval(seconds))
+                }
+            } else {
+                report(MouseDetector.connected())
+            }
+            exit(0)
+        }
+
+        // Developer aid: draw every mouse in the list on one sheet, to check the drawings.
+        if let i = args.firstIndex(of: "--snapshot-mice"), i + 1 < args.count {
+            let dark = args.contains("--dark")
+            let sheet = MouseSheet()
+                .background(dark ? Color(red: 0.11, green: 0.11, blue: 0.13) : Color(red: 0.97, green: 0.95, blue: 0.93))
+                .environment(\.colorScheme, dark ? .dark : .light)
+            let r = ImageRenderer(content: sheet)
+            r.scale = 2
+            if let cg = r.cgImage {
+                try? NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: args[i + 1]))
+            }
+            NSApp.terminate(nil)
+            return
         }
 
         // Developer aid: `--state not-installed|not-running|empty|unknown` and `--no-app` force
@@ -206,11 +278,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // "--profile generic" draws another mouse's profile instead of the MX Master 4.
             if let j = args.firstIndex(of: "--profile"), j + 1 < args.count {
                 guard let profile = MouseProfile.named(args[j + 1]) else {
-                    print("unknown profile \(args[j + 1]); known: \((MouseProfile.all + [.generic]).map { $0.id }.joined(separator: ", "))")
+                    print("unknown profile \(args[j + 1]); --list-mice prints the ones there are")
                     NSApp.terminate(nil)
                     return
                 }
                 state.use(profile)
+            } else {
+                // Pictures show the MX Master 4 unless told otherwise, whatever mouse this Mac used last.
+                state.use(.mxMaster4)
             }
             if forced != nil || args.contains("--no-app") {
                 state.agents.pinned = (forced ?? .running(agents: 3), !args.contains("--no-app"))
@@ -270,7 +345,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Log.write("---- MouseHerdr started ----")
         NSApp.setActivationPolicy(.accessory)
         setupStatusItem()
+        state.openWindow = { [weak self] in self?.showWindow() }
         state.start()
+        // A newly found mouse is pointed out under the menu bar icon while the window is closed.
+        noticeWatch = state.$mouseNotice.receive(on: DispatchQueue.main).sink { [weak self] _ in self?.showMouseNotice() }
 
         // Start quietly in the menu bar. The window opens by itself only the first time,
         // or when a permission still needs granting.
@@ -287,9 +365,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private var notice: NSPopover?
+    private var mousePopover: NSPopover?
+    private var noticeWatch: AnyCancellable?
+
+    /// Show what there is to say about a newly found mouse under the menu bar icon, unless the
+    /// window is open: there it is a banner. It closes when the notice is answered.
+    private func showMouseNotice() {
+        mousePopover?.close()
+        mousePopover = nil
+        guard let found = state.mouseNotice, !state.windowVisible, let button = statusItem?.button else { return }
+        // One thing at a time under the icon: wait for the "MouseHerdr is running" note to go.
+        guard notice == nil else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.showMouseNotice() }
+            return
+        }
+        let pop = NSPopover()
+        pop.behavior = .applicationDefined
+        pop.contentViewController = NSHostingController(rootView: MouseNoticePopover(notice: found) { [weak self] primary in
+            self?.state.answerNotice(primary: primary)
+        })
+        pop.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        mousePopover = pop
+        // Left alone, it steps aside; the notice then waits in the window. Having been up this
+        // long it counts as seen, so it does not come back under the icon another day.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 45) { [weak self, weak pop] in
+            guard let self, let pop, self.mousePopover === pop else { return }
+            pop.close()
+            self.mousePopover = nil
+            self.state.noticeSeen()
+        }
+    }
 
     private func explainMenuBar() {
-        guard let button = statusItem?.button else { return }
+        // A mouse notice under the icon already shows where the app lives.
+        guard mousePopover == nil, let button = statusItem?.button else { return }
         let pop = NSPopover()
         pop.behavior = .applicationDefined
         pop.contentViewController = NSHostingController(rootView: MenuBarNotice { [weak self] in
@@ -321,6 +430,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         item.button?.image = NSImage(systemSymbolName: "computermouse.fill", accessibilityDescription: "MouseHerdr")
         let menu = NSMenu()
         menu.addItem(withTitle: "Open MouseHerdr…", action: #selector(showWindow), keyEquivalent: "").target = self
+        // The way to the wheel on a mouse with no spare button, such as a Magic Mouse.
+        menu.addItem(withTitle: "Show Agent Wheel", action: #selector(showWheel), keyEquivalent: "").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit MouseHerdr", action: #selector(quit), keyEquivalent: "q").target = self
         item.menu = menu
@@ -329,9 +440,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc func quit() { NSApp.terminate(nil) }
 
+    @objc func showWheel() {
+        // Once the menu has closed, so the wheel opens around a pointer that is free to aim.
+        DispatchQueue.main.async { [weak self] in self?.state.toggleWheel() }
+    }
+
     // MARK: Window
 
     @objc func showWindow() {
+        // In the window the notice is a banner.
+        mousePopover?.close()
+        mousePopover = nil
         if window == nil {
             let w = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 1010, height: 690),
@@ -362,7 +481,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: Snapshot
 
     private func snapshot(to path: String, dark: Bool, slot: Slot?) {
-        state.deviceName = state.profile.name
         state.hidStatus = .connected
         state.battery = 85
         state.accessibilityOK = !CommandLine.arguments.contains("--needs-setup")
@@ -374,6 +492,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let argv = CommandLine.arguments
         if let j = argv.firstIndex(of: "--tab"), j + 1 < argv.count, let t = AppState.Tab(rawValue: argv[j + 1]) { state.tab = t }
         if argv.contains("--wheel") || argv.contains("--gesture") || argv.contains("--profile") { state.tab = .buttons }
+        // A made-up device of the profile's own kind, so the window says how it is "connected".
+        // "--no-mouse" shows the window with nothing connected.
+        let p = state.profile
+        var device = MouseDevice(vendorID: p.vendorIDs.sorted().first ?? 0, productID: p.productIDs.sorted().first ?? 0,
+                                 name: p.fullName, transport: p.usesDirectLink || p.brand == "Apple" ? "Bluetooth Low Energy" : "USB", buttons: 5)
+        if p.kind == .receiver { device.name = "USB Receiver" }
+        if p.kind == .fallback { device.name = "2.4G Wireless Mouse" }
+        // "--picker" shows the list of mice beside the picture, with two more mice connected; "--search text" narrows it.
+        let picking = argv.contains("--picker")
+        let others = picking ? [MouseDevice(vendorID: 0x045E, productID: 0x00CB, name: "Microsoft USB Optical Mouse", transport: "USB", buttons: 3),
+                                MouseDevice(vendorID: 0x046D, productID: 0xC52B, name: "USB Receiver", transport: "USB", buttons: 16)] : []
+        // Not the same mouse twice, should the profile being drawn be one of the two.
+        state.pose(p, as: argv.contains("--no-mouse") ? nil : device,
+                   among: others.filter { $0.key != device.key && $0.recognised?.id != p.id })
+        if picking {
+            state.tab = .buttons
+            state.choosingMouse = true
+            if let j = argv.firstIndex(of: "--search"), j + 1 < argv.count { state.mouseSearch = argv[j + 1] }
+        }
+        // "--notice" shows what is said when this mouse is found for the first time.
+        if argv.contains("--notice"), state.accessibilityOK {
+            state.mouseNotice = MouseSetup.notice(for: device, profile: p, triggers: state.wheelTriggers)
+        }
         if state.agents.pinned == nil {
             // Pinning keeps the picture from asking the real Herdr anything.
             state.agents.pinned = (.running(agents: Self.sampleAgents.count), true)
@@ -397,6 +538,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 }
 
 extension AppDelegate {
+    /// One line on what MouseHerdr makes of a device: the profile it would get and why.
+    static func describe(_ device: MouseDevice) -> String {
+        guard device.kind != .ignored else { return "ignored: \(device.name) is not a mouse" }
+        let profile = MouseChooser.profile(for: device, memory: MouseMemory(), firstRun: true)
+        let how: String
+        switch profile.kind {
+        case .mouse: how = profile.tested ? "recognised, tested" : "recognised"
+        case .receiver: how = "receiver, mouse model unknown"
+        case .fallback: how = "not in the list"
+        }
+        return "\(profile.id): \(MouseSetup.title(device: device, profile: profile)) (\(how))"
+    }
+
     /// Made-up agents for screenshots, so no real session ever ends up in a picture.
     static let sampleAgents: [AgentInfo] = {
         let rows: [(String, String, String)] = [

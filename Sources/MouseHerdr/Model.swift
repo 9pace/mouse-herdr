@@ -229,33 +229,136 @@ enum Catalog {
 // MARK: - Saved settings
 
 enum ConfigStore {
-    static let url: URL = {
+    /// Where MouseHerdr keeps what it is told.
+    static let folder: URL = {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("MouseHerdr")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let file = dir.appendingPathComponent("config.json")
+        let file = dir.appendingPathComponent(shared)
         // Settings saved under the app's earlier name carry over.
         let legacy = dir.deletingLastPathComponent().appendingPathComponent("MightyMouse/config.json")
         if !FileManager.default.fileExists(atPath: file.path), FileManager.default.fileExists(atPath: legacy.path) {
             try? FileManager.default.copyItem(at: legacy, to: file)
         }
-        return file
+        return dir
     }()
 
-    /// Saved choices on top of the mouse's own defaults.
-    static func load(defaults: [Slot: Action]) -> [Slot: Action] {
-        var result = defaults
-        if let data = try? Data(contentsOf: url),
-           let saved = try? JSONDecoder().decode([String: Action].self, from: data) {
-            for (k, v) in saved { if let slot = Slot(rawValue: k) { result[slot] = v } }
+    /// The MX Master 4's file. It was the only one before other mice were recognised, so it keeps its name.
+    private static let shared = "config.json"
+
+    /// The file one mouse's choices are saved in.
+    static func file(for profile: MouseProfile, in folder: URL = ConfigStore.folder) -> URL {
+        profile.id == MouseProfile.mxMaster4.id
+            ? folder.appendingPathComponent(shared)
+            : folder.appendingPathComponent("mice").appendingPathComponent(profile.id + ".json")
+    }
+
+    private static func read(_ url: URL) -> [Slot: Action]? {
+        guard let data = try? Data(contentsOf: url),
+              let saved = try? JSONDecoder().decode([String: Action].self, from: data) else { return nil }
+        var out: [Slot: Action] = [:]
+        for (k, v) in saved { if let slot = Slot(rawValue: k) { out[slot] = v } }
+        return out
+    }
+
+    /// A mouse's saved choices on top of its own defaults.
+    ///
+    /// A mouse with nothing saved yet starts from what was changed on the MX Master 4, so a back
+    /// button that was given another job keeps it on the next mouse. Choices that are only the
+    /// MX Master 4's defaults are not carried over: the new mouse's own defaults win.
+    static func load(for profile: MouseProfile, in folder: URL = ConfigStore.folder) -> [Slot: Action] {
+        var result = profile.defaults
+        if let own = read(file(for: profile, in: folder)) {
+            for (slot, action) in own { result[slot] = action }
+        } else if profile.id != MouseProfile.mxMaster4.id, let first = read(folder.appendingPathComponent(shared)) {
+            let untouched = MouseProfile.mxMaster4.defaults
+            for slot in profile.slots {
+                if let action = first[slot], action != untouched[slot] ?? .standard { result[slot] = action }
+            }
         }
         return result
     }
 
-    static func save(_ assignments: [Slot: Action]) {
+    /// Give a mouse a file of its own the first time it is followed, holding what it starts out
+    /// with. From then on a change made on the MX Master 4 no longer reaches it, so what its
+    /// owner was told about its buttons stays true.
+    static func settle(_ profile: MouseProfile, in folder: URL = ConfigStore.folder) {
+        guard profile.id != MouseProfile.mxMaster4.id,
+              !FileManager.default.fileExists(atPath: file(for: profile, in: folder).path) else { return }
+        save(load(for: profile, in: folder), for: profile, in: folder)
+    }
+
+    static func save(_ assignments: [Slot: Action], for profile: MouseProfile, in folder: URL = ConfigStore.folder) {
         let raw = Dictionary(uniqueKeysWithValues: assignments.map { ($0.key.rawValue, $0.value) })
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        do { try enc.encode(raw).write(to: url, options: .atomic) }
-        catch { Log.write("config save failed: \(error)") }
+        let url = file(for: profile, in: folder)
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try enc.encode(raw).write(to: url, options: .atomic)
+        } catch { Log.write("config save failed: \(error)") }
+    }
+}
+
+/// What MouseHerdr remembers about the mice it has met, kept beside the button settings.
+struct MouseMemory: Codable, Equatable {
+    /// Models picked by hand, by device: "046d:c52b" → "m720".
+    var chosen: [String: String] = [:]
+    /// Devices that have been followed, and their owner told what opens the agent wheel on them.
+    var introduced: [String] = []
+    /// Devices that were offered while another mouse was being followed. They are not offered twice.
+    var offered: [String] = []
+    /// The device to follow when several are connected, if the person picked one.
+    var pinned: String?
+    /// The profile last in use. It is shown until a mouse is found again.
+    var last: String?
+    /// This Mac ran MouseHerdr when every mouse was taken for an MX Master 4. The mouse behind a
+    /// Logi Bolt receiver, which can't say what it is, is still taken for one here.
+    var boltCarriesMXMaster4 = false
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        chosen = try c.decodeIfPresent([String: String].self, forKey: .chosen) ?? [:]
+        introduced = try c.decodeIfPresent([String].self, forKey: .introduced) ?? []
+        offered = try c.decodeIfPresent([String].self, forKey: .offered) ?? []
+        pinned = try c.decodeIfPresent(String.self, forKey: .pinned)
+        last = try c.decodeIfPresent(String.self, forKey: .last)
+        boltCarriesMXMaster4 = try c.decodeIfPresent(Bool.self, forKey: .boltCarriesMXMaster4) ?? false
+    }
+
+    /// Whether anything has been remembered yet on this Mac.
+    static func exists(in folder: URL = ConfigStore.folder) -> Bool {
+        FileManager.default.fileExists(atPath: file(in: folder).path)
+    }
+
+    static func file(in folder: URL = ConfigStore.folder) -> URL { folder.appendingPathComponent("mice.json") }
+
+    static func load(from folder: URL = ConfigStore.folder) -> MouseMemory {
+        guard let data = try? Data(contentsOf: file(in: folder)),
+              let memory = try? JSONDecoder().decode(MouseMemory.self, from: data) else { return MouseMemory() }
+        return memory
+    }
+
+    func save(to folder: URL = ConfigStore.folder) {
+        let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try enc.encode(self).write(to: MouseMemory.file(in: folder), options: .atomic)
+        } catch { Log.write("mouse memory save failed: \(error)") }
+    }
+
+    /// This device has been followed before, so its owner knows what it does.
+    func wasIntroduced(_ device: MouseDevice) -> Bool { introduced.contains(device.key) }
+
+    /// This device has been pointed out before, one way or the other.
+    func wasOffered(_ device: MouseDevice) -> Bool { offered.contains(device.key) || introduced.contains(device.key) }
+
+    mutating func introduce(_ device: MouseDevice) {
+        if !introduced.contains(device.key) { introduced = (introduced + [device.key]).sorted() }
+    }
+
+    mutating func offer(_ device: MouseDevice) {
+        if !offered.contains(device.key) { offered = (offered + [device.key]).sorted() }
     }
 }
