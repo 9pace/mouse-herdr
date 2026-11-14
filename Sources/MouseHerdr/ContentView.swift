@@ -84,7 +84,15 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("MouseHerdr").font(.system(size: 22, weight: .bold, design: .rounded))
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text("MouseHerdr").font(.system(size: 22, weight: .bold, design: .rounded))
+                        // Which copy this is: the version, and for a build from a checkout, its commit.
+                        if let version = AppVersion.label() {
+                            Text(version).font(.system(size: 11, weight: .medium)).foregroundStyle(.tertiary)
+                                .textSelection(.enabled)
+                                .help(AppVersion.sentence())
+                        }
+                    }
                     Text(subtitle).font(.system(size: 12.5)).foregroundStyle(.secondary)
                 }
                 Spacer()

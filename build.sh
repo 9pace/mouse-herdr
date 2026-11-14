@@ -63,6 +63,17 @@ BIN="$(swift build "${BUILD_FLAGS[@]}" --show-bin-path)/MouseHerdr"
 ICON="Resources/AppIcon.png"
 [ -s "$ICON" ] || { echo "Missing $ICON. Restore it from the repository." >&2; exit 1; }
 
+# Where the build comes from, shown beside the version in the window: the commit, with a + when
+# tracked files had been changed since, and the branch. Left empty outside a Git checkout.
+COMMIT="$(git rev-parse --short HEAD 2>/dev/null || true)"
+BRANCH="$(git symbolic-ref --short -q HEAD 2>/dev/null || true)"
+if [ -n "$COMMIT" ] && [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null || true)" ]; then
+  COMMIT="$COMMIT+"
+fi
+# Only what is safe to write into the property list as it is.
+[[ "$COMMIT" =~ ^[0-9a-f]+\+?$ ]] || COMMIT=""
+[[ "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || BRANCH=""
+
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/MouseHerdr"
@@ -91,6 +102,8 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleVersion</key><string>${BUILD_NUMBER}</string>
+  <key>MouseHerdrCommit</key><string>${COMMIT}</string>
+  <key>MouseHerdrBranch</key><string>${BRANCH}</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>

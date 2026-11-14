@@ -181,4 +181,114 @@ final class ButtonTap {
         if type == .otherMouseUp { onRelease?(button) }
         return nil
     }
+
+    // MARK: Escape
+
+    /// Called when Escape is pressed while it is being watched for. Return true if it was used,
+    /// which keeps it from the app in front.
+    var onEscape: (() -> Bool)?
+    private var keyTap: CFMachPort?
+    private var keySource: CFRunLoopSource?
+    private var escape = EscapeKey()
+    private static let escapeKey: Int64 = 53
+
+    /// Watch for the Escape key, or stop. Keys are looked at only while something of ours is
+    /// showing that Escape should put away. The rest of the time this tap is switched off, and
+    /// no key press comes near the app.
+    func watchEscape(_ on: Bool) {
+        escape.watching = on
+        if on, keyTap == nil {
+            let mask: CGEventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
+            let ctx = Unmanaged.passUnretained(self).toOpaque()
+            guard let port = CGEvent.tapCreate(
+                tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
+                eventsOfInterest: mask,
+                callback: { _, type, event, ctx in
+                    Unmanaged<ButtonTap>.fromOpaque(ctx!).takeUnretainedValue().handleKey(type, event)
+                }, userInfo: ctx)
+            else {
+                Log.write("escape: the keyboard can't be watched, so Escape will not close the wheel")
+                return
+            }
+            keyTap = port
+            keySource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, port, 0)
+            CFRunLoopAddSource(CFRunLoopGetMain(), keySource, .commonModes)
+        }
+        syncKeyTap()
+    }
+
+    /// The tap is on exactly while Escape is wanted, or one that was used has yet to be let go.
+    private func syncKeyTap() {
+        if let keyTap { CGEvent.tapEnable(tap: keyTap, enable: escape.needsTap) }
+    }
+
+    private func handleKey(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
+        let pass = Unmanaged.passUnretained(event)
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            syncKeyTap()
+            return pass
+        }
+        // Every other key goes straight on, and so do key presses MouseHerdr makes itself.
+        guard event.getIntegerValueField(.keyboardEventKeycode) == Self.escapeKey,
+              event.getIntegerValueField(.eventSourceUserData) != ActionRunner.marker else { return pass }
+        if type == .keyUp {
+            let ours = escape.released()
+            syncKeyTap()
+            return ours ? nil : pass
+        }
+        // Only a plain Escape is ours. ⌥⌘⎋ and the like belong to the system.
+        let plain = event.flags.intersection([.maskCommand, .maskControl, .maskAlternate]).isEmpty
+        switch escape.pressed(repeating: event.getIntegerValueField(.keyboardEventAutorepeat) != 0, plain: plain) {
+        case .keep: return nil
+        case .pass: return pass
+        case .ask:
+            // Using it closes the wheel, which stops the watching: the key is already marked as
+            // held, so the tap stays on for its release.
+            if onEscape?() ?? false { return nil }
+            escape.notUsed()
+            syncKeyTap()
+            return pass
+        }
+    }
+}
+
+/// What becomes of the Escape key while something of ours can be put away with it. It is kept
+/// apart from the event tap so that it can be tested.
+struct EscapeKey {
+    enum Verdict {
+        /// Keep it from the app in front.
+        case keep
+        /// Let it through untouched.
+        case pass
+        /// Ask whether there is something to close; if so keep it, if not call `notUsed`.
+        case ask
+    }
+
+    /// Something that Escape should close is showing.
+    var watching = false
+    /// An Escape that was used is still down, so its repeats and its release are kept as well:
+    /// the app in front must not get the tail end of a key press it never saw begin.
+    private(set) var held = false
+
+    /// Keys have to be looked at: Escape is wanted, or one that was used has yet to be let go.
+    var needsTap: Bool { watching || held }
+
+    /// Escape went down.
+    mutating func pressed(repeating: Bool, plain: Bool) -> Verdict {
+        if held && repeating { return .keep }
+        held = false            // a fresh press: whatever release was missed, start over
+        guard watching, plain else { return .pass }
+        held = true
+        return .ask
+    }
+
+    /// Nothing wanted the Escape that `pressed` asked about.
+    mutating func notUsed() { held = false }
+
+    /// Escape was let go. True if it is ours to keep.
+    mutating func released() -> Bool {
+        guard held else { return false }
+        held = false
+        return true
+    }
 }

@@ -31,6 +31,42 @@ enum Log {
     }
 }
 
+// MARK: - Version
+
+/// Which copy of the app this is, as its bundle states it. `build.sh` writes all three.
+enum AppVersion {
+    /// "1.0.37" for a release. A build made from a checkout has the VERSION file's "1.0".
+    static let number = string("CFBundleShortVersionString")
+    /// The commit the build was made from, with a "+" when files had been changed since.
+    static let commit = string("MouseHerdrCommit")
+    /// The branch it was made from, when there was one.
+    static let branch = string("MouseHerdrBranch")
+
+    private static func string(_ key: String) -> String? {
+        let value = Bundle.main.object(forInfoDictionaryKey: key) as? String
+        return (value?.isEmpty ?? true) ? nil : value
+    }
+
+    /// What the window shows beside the app's name: "v1.0.37 · c48b7e7". Several builds can be
+    /// about on one Mac, and the commit is what tells them apart.
+    static func label(number: String? = AppVersion.number, commit: String? = AppVersion.commit) -> String? {
+        guard let number else { return commit }
+        return commit.map { "v\(number) · \($0)" } ?? "v\(number)"
+    }
+
+    /// The same in words, for the tooltip and for `--version`.
+    static func sentence(number: String? = AppVersion.number, commit: String? = AppVersion.commit,
+                         branch: String? = AppVersion.branch) -> String {
+        var text = "MouseHerdr \(number ?? "of an unknown version")"
+        guard let commit else { return text }
+        let changed = commit.hasSuffix("+")
+        text += ", built from commit \(changed ? String(commit.dropLast()) : commit)"
+        if let branch { text += " on \(branch)" }
+        if changed { text += ", with changes that were not committed" }
+        return text
+    }
+}
+
 // MARK: - Slots (things on a mouse you can assign; which ones a mouse has is in its MouseProfile)
 
 enum Slot: String, CaseIterable, Codable, Identifiable {

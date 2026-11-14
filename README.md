@@ -53,6 +53,12 @@ Click the GIF to watch **MouseHerdr: Welcome to My Herd** on YouTube
   [another mouse](#other-mice), press the scroll wheel. Agents waiting on you are orange,
   wider, and closest.
 - Aim at one and click its wedge to jump to it in the Herdr app.
+- You need not aim at all. The middle of the wheel, where the pointer rests as it opens,
+  stands for one agent: the one that most recently started waiting on you, or else the
+  latest one. That agent is picked out as the wheel appears and, if it is waiting, its
+  question is already showing. Click the middle to open it.
+- To put the wheel away, right-click the middle, press Escape, or press the button that
+  opened it again. Escape goes no further: the app in front does not see it.
 - The most recently active agents come first. A busy agent says how long its turn has run
   ("working 5m") and a quiet one how long ago it was active ("3h ago"). Quiet agents fade
   to grey and get thinner and shorter, so the busy ones stand out; point at one and it
@@ -79,7 +85,9 @@ Click the GIF to watch **MouseHerdr: Welcome to My Herd** on YouTube
 The window has three pages. **Agents** comes first: it lists your agents with what each
 is asking, lets you answer or open one, and has a button to show the wheel. **Buttons** is
 the mouse picture for assigning actions, including "Show the agent wheel" for any button.
-**Feel** holds the haptic and window-snapping switches.
+**Feel** holds the haptic and window-snapping switches. Beside the app's name the window
+says which version is running and, for a build made from a checkout, the commit it was
+built from, so that two builds on one Mac can be told apart.
 
 ### Other mice
 
@@ -387,6 +395,11 @@ network behavior.
 To recognise a mouse, MouseHerdr reads what each connected pointing device reports about
 itself: its vendor and product ids, its name, how it is connected and how many buttons it
 declares. It opens none of them and sends nothing anywhere.
+
+MouseHerdr does not read the keyboard, with one exception: while the agent wheel is
+showing, key presses pass through it so that it can tell when Escape is pressed and put the
+wheel away. It acts on no other key, keeps and logs none, and stops the moment the wheel
+closes.
 
 Logs can contain application names, agent workspace/tab names, button events, local paths
 and the names of connected mice. A Bluetooth mouse's name can include its owner's, as in

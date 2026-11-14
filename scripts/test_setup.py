@@ -196,6 +196,12 @@ class MouseDetectionTests(unittest.TestCase):
         for profile in ["mxMaster4", "generic", "generic3", "generic2"]:
             self.assertIn(profile, ids)
 
+    def test_the_app_says_which_copy_it_is(self):
+        result = self.run_app("--version")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # "MouseHerdr 1.0", and for a build made from a checkout the commit it was built from.
+        self.assertRegex(result.stdout.strip(), r"^MouseHerdr \d+\.\d+(\.\d+)?(, built from commit [0-9a-f]+.*)?$")
+
     def test_looking_for_connected_mice_is_quick_and_asks_for_nothing(self):
         started = time.monotonic()
         result = self.run_app("--detect-mice")

@@ -545,6 +545,14 @@ final class AppState: ObservableObject {
         }
         if accessibilityOK { tap.start() }
         watchAgents()
+        // While the wheel is up, Escape puts it away, and the app in front never hears of it.
+        ring.onOpenChange = { [weak self] open in self?.tap.watchEscape(open) }
+        tap.onEscape = { [weak self] in
+            guard let self, self.ring.isOpen else { return false }
+            Log.write("agents: wheel closed with Escape")
+            self.ring.close()
+            return true
+        }
         ring.onAim = { [weak self] in self?.buzz(.tick) }
         ring.onChoose = { [weak self] agent in self?.agents.focus(agent) }
         ring.onPin = { [weak self] agent in
@@ -674,7 +682,9 @@ final class AppState: ObservableObject {
         // One question at a time, so a herdr-core that is slow to answer can't build up a queue.
         guard !agentsFetching else { return }
         agentsFetching = true
-        agents.fetch { [weak self] list in
+        // What a waiting agent is asking is read too, so that the wheel has its question to hand
+        // the moment it opens.
+        agents.fetch(details: .waiting) { [weak self] list in
             guard let self else { return }
             self.agentsFetching = false
             self.noteHerdr()
@@ -704,7 +714,7 @@ final class AppState: ObservableObject {
     func refreshAgentList() {
         guard windowVisible, tab == .agents, !listFetching else { return }
         listFetching = true
-        agents.fetch(details: true) { [weak self] list in
+        agents.fetch(details: .all) { [weak self] list in
             guard let self else { return }
             self.listFetching = false
             self.noteHerdr()
@@ -714,7 +724,8 @@ final class AppState: ObservableObject {
 
     /// Open the wheel at the pointer, or pick from it if it is already open.
     func toggleWheel() {
-        if ring.isOpen { ring.choose() } else { openRing() }
+        // Pressed again while the wheel is open, it picks the wedge aimed at, or puts the wheel away.
+        if ring.isOpen { ring.choose(fromTrigger: true) } else { openRing() }
     }
 
     func focus(_ agent: AgentInfo) { agents.focus(agent) }
@@ -767,7 +778,7 @@ final class AppState: ObservableObject {
     private func refreshRing() {
         guard !ringFetching else { return }
         ringFetching = true
-        agents.fetch(details: true) { [weak self] list in
+        agents.fetch(details: .all) { [weak self] list in
             guard let self else { return }
             self.ringFetching = false
             self.noteHerdr()
@@ -943,7 +954,7 @@ final class AppState: ObservableObject {
     private func release(_ slot: Slot) {
         if hasGestures(slot) { gestureUp(); return }
         guard action(slot).isDrag else { return }
-        if ringPress { ringPress = false; ring.choose(); return }
+        if ringPress { ringPress = false; ring.choose(fromTrigger: true); return }
         guard !stickyDrag else { return }
         if pulseSource {
             // A button that can't be held: carry the window until the next click.

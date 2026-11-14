@@ -404,23 +404,55 @@ final class AgentWatcher {
 
     /// A plain listing doesn't say what a session is about or when it was last active, so keep
     /// what the last full look found. A status that has changed since then changed just now.
-    static func carry(from old: [AgentInfo], into new: [AgentInfo], now: Date = Date()) -> [AgentInfo] {
+    ///
+    /// An agent that is still waiting keeps the question it was last seen asking, so that the
+    /// wheel can show it the moment it opens. It may have moved on to another question without
+    /// its status changing, which is why the wheel looks again before it lets one be answered.
+    /// `fresh` names the agents this look has just read in full; they are left as they are.
+    static func carry(from old: [AgentInfo], into new: [AgentInfo], fresh: Set<String> = [], now: Date = Date()) -> [AgentInfo] {
         let known = Dictionary(old.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         return new.map { a in
-            guard let before = known[a.id] else { return a }
+            guard !fresh.contains(a.id), let before = known[a.id] else { return a }
             var a = a
             a.title = before.title
             a.inner = before.inner
             a.lastActive = before.status == a.status ? before.lastActive : now
+            if before.status == a.status {
+                a.message = before.message
+                a.kind = before.kind
+                a.prompt = before.prompt
+                a.screenOptions = before.screenOptions
+                a.hints = before.hints
+                a.typeOption = before.typeOption
+            }
             return a
         }
     }
 
-    /// Fill in what each agent is saying (its title and question) from `hc get`.
-    private static func addDetails(_ list: [AgentInfo], hc: String) -> [AgentInfo] {
+    /// How much to find out about each agent beyond the plain listing.
+    enum Detail {
+        /// The listing only: who is there and in what state.
+        case none
+        /// Also what the agents that are waiting on you are asking, read no more often than `questionAge`.
+        case waiting
+        /// Also what every agent is about and saying.
+        case all
+    }
+
+    /// How old a waiting agent's question may be before the background look reads it again.
+    static let questionAge: TimeInterval = 12
+
+    /// Fill in what the agents picked by `wanted` are saying (title and question) from `hc get`.
+    /// `read` comes back with the agents that answered. One that did not is left as the listing
+    /// has it, and whoever asked keeps what was known about it rather than showing it blank.
+    private static func addDetails(_ list: [AgentInfo], hc: String, wanted: (AgentInfo) -> Bool = { _ in true })
+        -> (agents: [AgentInfo], read: Set<String>) {
         var out = list
+        var read: Set<String> = []
         let lock = NSLock()
+        let picked = list.map(wanted)
         DispatchQueue.concurrentPerform(iterations: list.count) { i in
+            guard picked[i] else { return }
             guard let data = run(hc, ["get", list[i].id, "--json"]),
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
             let status = obj["status"] as? [String: Any]
@@ -443,26 +475,45 @@ final class AgentWatcher {
             out[i].kind = status?["kind"] as? String ?? ""
             out[i].lastActive = lastActive(obj)
             out[i].inner = busyRecords(obj)
+            read.insert(list[i].id)
             lock.unlock()
         }
-        return out
+        return (out, read)
     }
 
     /// Ask herdr-core what is running. Works out the state of Herdr from how the call went,
     /// so a missing, stopped or stuck herdr-core each come back as an answer rather than a failure.
-    static func look(details: Bool) -> (status: HerdrStatus, agents: [AgentInfo]) {
-        guard let hc = tool("hc") else { return (.notInstalled, []) }
+    /// `stale` says, for an agent that is waiting, whether its question is due to be read again;
+    /// it only matters for `.waiting`. `read` comes back with the agents that were read in full.
+    static func look(details: Detail, stale: (AgentInfo) -> Bool = { _ in true })
+        -> (status: HerdrStatus, agents: [AgentInfo], read: Set<String>) {
+        guard let hc = tool("hc") else { return (.notInstalled, [], []) }
         // A failed, slow or garbled listing all mean the same to the person: it isn't answering.
-        guard let data = run(hc, ["ls", "--json"]), var list = parseList(data) else { return (.notRunning, []) }
-        if details { list = addDetails(list, hc: hc) }
-        return (.running(agents: list.count), list)
+        guard let data = run(hc, ["ls", "--json"]), var list = parseList(data) else { return (.notRunning, [], []) }
+        var read: Set<String> = []
+        switch details {
+        case .none: break
+        case .waiting:
+            let due = Set(list.filter { $0.needsYou && stale($0) }.map(\.id))
+            if !due.isEmpty { (list, read) = addDetails(list, hc: hc) { due.contains($0.id) } }
+        case .all:
+            (list, read) = addDetails(list, hc: hc)
+        }
+        return (.running(agents: list.count), list, read)
     }
 
+    /// When each waiting agent's question was last read, so that the background look reads it
+    /// again only now and then. Used on the main thread.
+    private var questionRead: [String: Date] = [:]
+
     /// Fetch the current agents; the result arrives on the main thread, with `status` and
-    /// `appInstalled` brought up to date first.
-    func fetch(details: Bool = false, _ done: @escaping ([AgentInfo]) -> Void) {
+    /// `appInstalled` brought up to date first. Call it on the main thread.
+    func fetch(details: Detail = .none, _ done: @escaping ([AgentInfo]) -> Void) {
+        let lastRead = questionRead, asked = Date()
         queue.async {
-            let found = Self.look(details: details)
+            let found = Self.look(details: details) { agent in
+                lastRead[agent.id].map { asked.timeIntervalSince($0) >= Self.questionAge } ?? true
+            }
             let app = Self.herdrAppInstalled()
             DispatchQueue.main.async {
                 if self.pinned == nil {
@@ -472,7 +523,12 @@ final class AgentWatcher {
                     if app != self.appInstalled { Log.write("agents: Herdr app \(app ? "found" : "not installed")") }
                     self.status = found.status
                     self.appInstalled = app
-                    self.latest = details ? found.agents : Self.carry(from: self.latest, into: found.agents)
+                    self.latest = Self.carry(from: self.latest, into: found.agents, fresh: found.read)
+                    // Note whose question was just read, and forget those who are no longer waiting:
+                    // the next time they ask, it is read at once.
+                    for id in found.read { self.questionRead[id] = asked }
+                    let waiting = Set(found.agents.filter(\.needsYou).map(\.id))
+                    self.questionRead = self.questionRead.filter { waiting.contains($0.key) }
                 }
                 done(self.latest)
             }
@@ -659,6 +715,14 @@ final class RingModel: ObservableObject {
     /// A notice that stays until the wheel closes, whatever new data says.
     var heldNotice = false
     @Published var highlighted: String?
+    /// The agent the hub in the middle stands for, so that it can be reached without moving the
+    /// pointer, which rests on the hub as the wheel opens: the agent that most recently started
+    /// waiting on you or, when nobody is, the one that was active last.
+    @Published var centre: String?
+    /// Whether the hub's agent was waiting when it was picked. See `layout`.
+    private var centreWaiting = false
+    /// The pointer is on the hub.
+    @Published var onHub = false
     /// False while the wheel is off screen, so its animations stop costing anything.
     @Published var active = true
     /// Where the speech bubble for the highlighted agent sits, relative to the wheel's centre.
@@ -677,6 +741,12 @@ final class RingModel: ObservableObject {
     /// Which answer button the pointer is over, and which one was just sent.
     @Published var hoveredOption: Int?
     @Published var sentOption: Int?
+    /// The agents have been looked at since the wheel opened. Until then a question on show is
+    /// the one last seen, which the agent may have moved on from, so it can be read but not
+    /// answered: an answer is sent as a key press, and it must land on the question that is shown.
+    @Published var confirmed = false
+    /// An answer can be sent now.
+    var canAnswer: Bool { confirmed && sentOption == nil }
 
     // Bubble layout, shared by drawing and hit-testing.
     static let bubbleWidth: CGFloat = 400
@@ -728,7 +798,18 @@ final class RingModel: ObservableObject {
         // Every agent gets a wedge; the more there are, the thinner they all get.
         let all = Self.arrange(agents, order: order, pinned: pinned)
         outerRadius = all.count > 9 ? 300 : (all.count > 6 ? 275 : 250)
-        guard !all.isEmpty else { slices = []; bands = []; highlighted = nil; return }
+        guard !all.isEmpty else { slices = []; bands = []; highlighted = nil; centre = nil; return }
+
+        // The hub keeps its agent for as long as the wheel is open, so that a question being read
+        // there is not swapped for a newer one. It moves on when that agent has gone, or when it
+        // stops or starts waiting: answered, the next one that wants something takes its place.
+        if let held = all.first(where: { $0.id == centre }), held.needsYou == centreWaiting {
+            // still the one
+        } else {
+            let pick = Self.centreAgent(all)
+            centre = pick?.id
+            centreWaiting = pick?.needsYou ?? false
+        }
 
         // Agents waiting on you get wider wedges that also reach further in, so they are the closest
         // targets. Busy ones are all one size. A quiet one starts at that size and slowly gets thinner
@@ -823,11 +904,35 @@ final class RingModel: ObservableObject {
         return bySpace
     }
 
+    /// The hub's radius. Nothing inside it is on a wedge.
+    static let hubRadius: CGFloat = 46
+
+    /// The agent the hub stands for among these: whoever most recently started waiting on you,
+    /// or else whoever is busy or was active last. This is the wheel's "most recent" order, leaving
+    /// pins out of it: a pin keeps an agent near the front, it does not make it the latest.
+    static func centreAgent(_ agents: [AgentInfo]) -> AgentInfo? {
+        arrange(agents, order: .recent).first
+    }
+
+    /// Whether a point, as an offset from the centre, is on the hub.
+    static func isOnHub(_ p: CGSize) -> Bool { hypot(p.width, p.height) <= hubRadius }
+
+    /// What the pointer is aiming at: on the hub, the hub's agent; anywhere else, the wedge under it.
+    func aim(at p: CGSize) -> String? {
+        Self.isOnHub(p) ? centre : target(for: p)
+    }
+
+    /// Start afresh for a wheel that is opening: the hub picks its agent anew.
+    func forgetCentre() {
+        centre = nil
+        onHub = false
+    }
+
     /// The agent the pointer is aiming at, given its offset from the centre (y down). This goes by
     /// where each wedge rests: the one pointed at is drawn bigger and lies over its neighbours, but
     /// moving onto a neighbour's place picks the neighbour, so even a sliver can always be reached.
     func target(for p: CGSize) -> String? {
-        guard hypot(p.width, p.height) > 46 else { return nil }
+        guard !Self.isOnHub(p) else { return nil }
         let angle = atan2(Double(p.height), Double(p.width))
         for s in slices {
             var d = (angle - s.start).truncatingRemainder(dividingBy: 2 * .pi)
@@ -1196,13 +1301,19 @@ struct RingView: View {
                 if let since = pointed?.ago ?? pointed?.busyFor.map({ "for \($0)" }) {
                     Text(since).font(.system(size: 10.5, weight: .medium)).opacity(0.85)
                 }
-                Text(focus.agent).font(.system(size: 10.5)).opacity(0.75).lineLimit(1)
-                Text(model.canJump ? "click to open" : "no Herdr app").font(.system(size: 9.5)).opacity(0.5)
-                HStack(spacing: 2) {
-                    Image(systemName: pointed?.pinned == true ? "pin.slash.fill" : "pin.fill").font(.system(size: 7.5))
-                    Text("right-click")
+                // On the hub itself there are two things to say about clicking, so the agent's kind makes room.
+                if !model.onHub { Text(focus.agent).font(.system(size: 10.5)).opacity(0.75).lineLimit(1) }
+                Text(model.canJump ? "click to open" : "no Herdr app").font(.system(size: 9.5)).opacity(model.onHub ? 0.8 : 0.5)
+                if model.onHub {
+                    // On the hub itself the other button puts the wheel away.
+                    Text("right-click closes").font(.system(size: 9)).opacity(0.5)
+                } else {
+                    HStack(spacing: 2) {
+                        Image(systemName: pointed?.pinned == true ? "pin.slash.fill" : "pin.fill").font(.system(size: 7.5))
+                        Text("right-click")
+                    }
+                    .font(.system(size: 9)).opacity(0.5)
                 }
-                .font(.system(size: 9)).opacity(0.5)
             } else if waiting > 0 {
                 Text("\(waiting)").font(.system(size: 26, weight: .bold, design: .rounded)).foregroundStyle(Palette.accent)
                 Text(waiting == 1 ? "needs you" : "need you").font(.system(size: 10.5)).opacity(0.8)
@@ -1212,10 +1323,11 @@ struct RingView: View {
             }
         }
         .foregroundStyle(.white)
-        .frame(width: 92, height: 92)
+        .frame(width: RingModel.hubRadius * 2, height: RingModel.hubRadius * 2)
         .background(Circle().fill(RadialGradient(colors: [Color(white: 0.22), Color(white: 0.08)], center: .top, startRadius: 4, endRadius: 90)))
-        .overlay(Circle().stroke(Color.white.opacity(0.22), lineWidth: 1.5))
-        .shadow(color: .black.opacity(0.5), radius: 10)
+        // With the pointer on it, the hub is a button for the agent it names.
+        .overlay(Circle().stroke(model.onHub ? Palette.accent : Color.white.opacity(0.22), lineWidth: model.onHub ? 2.5 : 1.5))
+        .shadow(color: model.onHub ? Palette.accent.opacity(0.55) : .black.opacity(0.5), radius: 10)
     }
 }
 
@@ -1295,9 +1407,11 @@ struct SpeechBubble: View {
                     let own = i >= speech.options.count
                     answerButton(i, own ? "Type your own answer…" : speech.options[i], own: own,
                                  deny: !own && speech.options[i].lowercased().hasPrefix("no"),
-                                 hot: model.hoveredOption == i, sent: model.sentOption == i)
+                                 hot: model.confirmed && model.hoveredOption == i, sent: model.sentOption == i)
                         .frame(width: r.width, height: r.height)
                         .offset(x: r.minX, y: r.minY)
+                        // Faint until the question has been checked to be the one the agent is asking now.
+                        .opacity(model.confirmed ? 1 : 0.45)
                 }
                 if let i = model.hoveredOption, let hint = agent.hints[i + 1], !hint.isEmpty {
                     let r = RingModel.optionRect(i, in: bubble)
@@ -1306,6 +1420,7 @@ struct SpeechBubble: View {
                         .transition(.opacity)
                 }
                 Text(model.sentOption != nil ? "Sent — waiting for the agent…"
+                     : !model.confirmed ? "Checking that this is still what it asks…"
                      : (!bubble.expanded && agent.isLongQuestion) ? "Move onto the bubble to read the whole question"
                      : approval != nil ? "\(agent.prompt.isEmpty ? "Do you want to proceed?" : agent.prompt)  Click an answer to send it"
                      : "Point at an answer and click to send it")
@@ -1399,6 +1514,8 @@ final class AgentRing {
     var onAnswer: ((AgentInfo, Int) -> Void)?
     /// The person wants to type their own answer; the point is where to put the text box (Cocoa screen coordinates).
     var onType: ((AgentInfo, CGPoint) -> Void)?
+    /// The wheel has come up, or has been put away.
+    var onOpenChange: ((Bool) -> Void)?
     private var lastQuestion = ""
     private var pointerOnWheel = false     // the pointer is over a wedge right now
     private var pointerOnBubble = false
@@ -1428,6 +1545,8 @@ final class AgentRing {
         model.sentOption = nil
         model.bubble = nil
         model.active = true
+        model.forgetCentre()
+        model.confirmed = false     // what is shown at first is what was last seen; `update` brings the present
         shown = agents
         model.layout(agents)
         let side = Self.canvas
@@ -1463,6 +1582,10 @@ final class AgentRing {
         let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in self?.track() }
         RunLoop.main.add(t, forMode: .common)
         timer = t
+        onOpenChange?(true)
+        // The pointer starts on the hub, so the hub's agent is aimed at from the first moment:
+        // if it is waiting on you, its question is there as the wheel appears.
+        track()
     }
 
     /// New data arrived while the ring is open.
@@ -1472,6 +1595,7 @@ final class AgentRing {
         model.canJump = appInstalled
         shown = agents
         model.layout(agents)
+        model.confirmed = true
         placeBubble()
     }
 
@@ -1485,6 +1609,8 @@ final class AgentRing {
 
     /// A right-click: pin or unpin the wedge being aimed at and stay open. Anywhere else it is an ordinary click.
     func pinAimed() {
+        // On the hub a right-click puts the wheel away, the other half of a left-click opening its agent.
+        if model.onHub { close(); return }
         guard model.notice == nil, pointerOnWheel, let picked = model.slices.first(where: { $0.id == model.highlighted })?.agent else {
             choose()
             return
@@ -1528,10 +1654,17 @@ final class AgentRing {
         // A notice is small, so it lets go sooner than a wheel with bubbles around it.
         if !overBubble && r > (model.notice != nil ? 300 : model.outerRadius + 330) { close(); return }
 
+        // On the hub the pointer aims at the hub's agent.
+        let onHub = model.notice == nil && model.centre != nil && RingModel.isOnHub(rel)
+        if onHub != model.onHub {
+            model.onHub = onHub
+            placeBubble()       // a bubble that only a question earns on the hub may now show, or go
+        }
+
         // Which wedge is aimed at only changes while the pointer is on the wheel itself,
         // so travelling out to the bubble keeps that agent selected.
         guard r <= model.outerRadius + 22, !overBubble || r <= model.outerRadius else { return }
-        let aim = model.target(for: rel)
+        let aim = model.aim(at: rel)
         if aim != model.highlighted {
             model.highlighted = aim
             model.sentOption = nil
@@ -1544,7 +1677,10 @@ final class AgentRing {
 
     /// Put the speech bubble just outside the highlighted wedge, kept on screen.
     private func placeBubble() {
-        guard let s = model.slices.first(where: { $0.id == model.highlighted }), s.agent.hasSpeech else {
+        // From the hub, only an agent that is waiting on you shows what it says: its question is
+        // why the wheel was opened. One that is merely the latest shows its words when pointed at.
+        guard let s = model.slices.first(where: { $0.id == model.highlighted }), s.agent.hasSpeech,
+              !model.onHub || s.agent.needsYou else {
             model.bubble = nil
             return
         }
@@ -1589,13 +1725,21 @@ final class AgentRing {
     }
 
     /// Pick whatever is aimed at (or just close when nothing is).
-    func choose() {
+    ///
+    /// A click on the hub opens the hub's agent, so the latest agent, or the one asking for you,
+    /// can be reached without moving the pointer. `fromTrigger` is a second press of the control
+    /// that opened the wheel: on the hub that still closes it, as it always has, so the wheel can
+    /// be glanced at and put away with the same button.
+    func choose(fromTrigger: Bool = false) {
         // A notice has nothing to pick: any click or tap just closes it.
         if model.notice != nil { close(); return }
         let picked = model.slices.first { $0.id == model.highlighted }?.agent
+        // On a wedge, or on the hub that stands for one.
+        let onAgent = pointerOnWheel || (model.onHub && !fromTrigger)
         // On an answer button: send that answer and stay open for the next question.
         if let option = model.hoveredOption, let picked, picked.needsYou {
-            guard model.sentOption == nil else { return }
+            // Not while an answer is on its way, nor before the question has been checked to be the current one.
+            guard model.canAnswer else { return }
             if option >= picked.speech.options.count {
                 // The free-text choice: swap the wheel for a text box where the bubble was.
                 let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
@@ -1611,9 +1755,9 @@ final class AgentRing {
             return
         }
         // A click on the bubble itself (not on a button) does nothing.
-        if pointerOnBubble && !pointerOnWheel { return }
+        if pointerOnBubble && !onAgent { return }
         // Without the Herdr app there is nowhere to jump to; say so rather than closing on a click that did nothing.
-        if pointerOnWheel, let picked, !model.canJump {
+        if onAgent, let picked, !model.canJump {
             Log.write("agents: can't jump to \(picked.id), the Herdr app is not installed")
             model.highlighted = nil
             model.bubble = nil
@@ -1622,20 +1766,27 @@ final class AgentRing {
             model.bands = []
             model.notice = .noApp
             model.heldNotice = true
+            model.onHub = false
             pointerOnWheel = false
             pointerOnBubble = false
             return
         }
         close()
-        // Only a click on a wedge opens that agent; clicking anywhere else just dismisses the wheel.
-        if pointerOnWheel, let picked { onChoose?(picked) }
+        // Only a click on a wedge or on the hub opens an agent; clicking anywhere else just dismisses the wheel.
+        if onAgent, let picked {
+            if model.onHub { Log.write("agents: opening \(picked.id) from the middle of the wheel") }
+            onChoose?(picked)
+        }
     }
 
     func close() {
+        let wasOpen = isOpen
         timer?.invalidate()
         timer = nil
         panel?.orderOut(nil)
         model.active = false
+        model.onHub = false
+        if wasOpen { onOpenChange?(false) }
     }
 }
 

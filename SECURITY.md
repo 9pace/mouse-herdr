@@ -18,6 +18,9 @@ To recognise the mouse, it reads what connected pointing devices report about th
 vendor and product ids, name, connection type and number of buttons. This needs neither
 permission, opens no device and stays on your Mac.
 
+Key presses are looked at only while the agent wheel is showing, and only to tell whether
+one is the Escape key, which closes the wheel. Nothing typed is read, kept or logged.
+
 Agent integration invokes locally installed `hc` and `herdr-app` commands. Those commands
 must be trusted: they can read agent sessions and deliver input to them. Questions and
 terminal text are read into memory; typed answers are sent only when you choose to reply.

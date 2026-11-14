@@ -38,10 +38,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // MOUSEHERDR_HC and MOUSEHERDR_HERDR_APP point it at other (or missing) commands.
         if args.contains("--herdr-status") {
             let started = Date()
-            let found = AgentWatcher.look(details: false)
+            let found = AgentWatcher.look(details: .none)
             print("herdr-core: \(found.status.summary)")
             print("Herdr app: \(AgentWatcher.herdrAppInstalled() ? "installed" : "not installed")")
             print(String(format: "took %.1f seconds", Date().timeIntervalSince(started)))
+            exit(0)
+        }
+
+        // Developer aid: which copy this is, the way the window says it.
+        if args.contains("--version") {
+            print(AppVersion.sentence())
             exit(0)
         }
 
@@ -131,6 +137,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let i = args.firstIndex(of: "--snapshot-ring"), i + 1 < args.count {
             let model = RingModel()
             model.canJump = !args.contains("--no-app")
+            // A picture shows the wheel as it is once it has looked; "--unchecked" shows the moment before.
+            model.confirmed = !args.contains("--unchecked")
             // "--order space|recent" picks how the wedges are ordered.
             if let j = args.firstIndex(of: "--order"), j + 1 < args.count {
                 guard let order = RingOrder(rawValue: args[j + 1]) else {
@@ -233,7 +241,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     return args[j + 1]
                 }
                 let pick = value("--highlight")
-                let slice = pick == "none" ? nil : model.slices.dropFirst(Int(pick ?? "0") ?? 0).first
+                // "--hub" shows the wheel as it opens: the pointer on the hub, aiming at the hub's agent.
+                let onHub = args.contains("--hub")
+                let slice = onHub ? model.slices.first { $0.id == model.centre }
+                    : pick == "none" ? nil : model.slices.dropFirst(Int(pick ?? "0") ?? 0).first
+                model.onHub = onHub && slice != nil
                 model.highlighted = slice?.id
                 if let s = slice, !args.contains("--no-bubble") {
                     let big = args.contains("--expanded")
