@@ -54,7 +54,11 @@ Click the GIF to watch **MouseHerdr: Welcome to My Herd** on YouTube
   grows back.
 - Right-click a wedge to pin that agent: pinned agents stay near the front at full size.
   The Agents page has a pin button on each agent too.
-- A small pill on a wedge counts the helpers that agent has started and that are still busy.
+- A small pill on a wedge counts the sub-agents that agent has busy, as herdr-core reports
+  them: terminals it started with `hc run`, and sub-agents it runs inside itself. A
+  sub-agent gets a wedge of its own only when it is waiting on you.
+- Every agent gets a wedge. On a crowded wheel they all get thinner, and the one you point
+  at grows wide enough to read.
 - When a Herdr space has several sessions, each wedge also says what its session is about.
   The Agents page can order the wheel by space instead, which keeps every agent in its
   place and puts a space's sessions side by side under its name.
