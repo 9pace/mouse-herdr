@@ -15,3 +15,6 @@ local.env
 *.keychain-db
 *.log
 __pycache__/
+
+# Local design mockups, never committed
+mockups/
