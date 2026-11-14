@@ -15,6 +15,7 @@ struct AgentInfo: Identifiable, Equatable {
     var hints: [Int: String] = [:]   // the explanation shown under each choice, by choice number (1-based)
     var screenOptions: [String] = [] // the numbered choices read off its dialog, in order
     var prompt = ""                  // the dialog's own question line, e.g. "Do you want to proceed?"
+    var lastActive: Date?            // when it last changed what it is doing; nil until that is known
 
     /// For a request to approve an action: the tool it wants to use and exactly what it would do.
     var permission: (tool: String, detail: String)? {
@@ -93,6 +94,48 @@ struct AgentInfo: Identifiable, Equatable {
         case "done": return Color(red: 0.30, green: 0.80, blue: 0.47)
         default: return Color(white: 0.6)
         }
+    }
+
+    /// How long a session can sit quiet before it starts to fade, and when it has faded all the way.
+    static let freshFor: TimeInterval = 5 * 60
+    static let greyAfter: TimeInterval = 8 * 3600
+
+    /// 1 for a session that is busy, waiting on you or only just went quiet, falling to 0 the longer
+    /// it is left alone. It falls fast at first and slowly later, so minutes and hours both show.
+    func freshness(now: Date = Date()) -> Double {
+        if needsYou || status == "working" { return 1 }
+        guard let lastActive else { return 1 }   // not known yet, so don't guess
+        let quiet = now.timeIntervalSince(lastActive)
+        if quiet <= Self.freshFor { return 1 }
+        if quiet >= Self.greyAfter { return 0 }
+        return 1 - log(quiet / Self.freshFor) / log(Self.greyAfter / Self.freshFor)
+    }
+
+    /// How long ago it last did something, in a few characters. Nil while it is busy or waiting
+    /// on you (that is happening now) and before the time is known.
+    func ago(now: Date = Date()) -> String? {
+        if needsYou || status == "working" { return nil }
+        guard let lastActive else { return nil }
+        let quiet = max(0, now.timeIntervalSince(lastActive))
+        if quiet < 60 { return "just now" }
+        if quiet < 3600 { return "\(Int(quiet / 60))m ago" }
+        if quiet < 86400 { return "\(Int(quiet / 3600))h ago" }
+        return "\(Int(quiet / 86400))d ago"
+    }
+
+    /// The status colour, washed out to plain grey as the session goes quiet.
+    func color(freshness: Double) -> Color {
+        guard freshness < 1 else { return color }
+        let grey = NSColor(srgbRed: 0.44, green: 0.44, blue: 0.44, alpha: 1)
+        let mixed = NSColor(color).usingColorSpace(.sRGB)?.blended(withFraction: CGFloat(1 - max(0, freshness)), of: grey)
+        return Color(nsColor: mixed ?? grey)
+    }
+
+    /// What tells this session from the others in its space: what it is about, or else its tab.
+    var sessionName: String {
+        if !title.isEmpty { return title }
+        if tab.isEmpty { return agent }
+        return Int(tab) != nil ? "Tab \(tab)" : tab
     }
 
     /// Lower sorts first: the ones that want attention, then finished, then busy.
@@ -294,6 +337,25 @@ final class AgentWatcher {
         return (hints, typeOption, options, promptLines.last ?? "")
     }
 
+    /// When a terminal last changed what it is doing, from its `hc get` answer.
+    static func lastActive(_ obj: [String: Any]) -> Date? {
+        guard let ms = (obj["status_ms"] as? NSNumber)?.doubleValue, ms > 0 else { return nil }
+        return Date(timeIntervalSince1970: ms / 1000)
+    }
+
+    /// A plain listing doesn't say what a session is about or when it was last active, so keep
+    /// what the last full look found. A status that has changed since then changed just now.
+    static func carry(from old: [AgentInfo], into new: [AgentInfo], now: Date = Date()) -> [AgentInfo] {
+        let known = Dictionary(old.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        return new.map { a in
+            guard let before = known[a.id] else { return a }
+            var a = a
+            a.title = before.title
+            a.lastActive = before.status == a.status ? before.lastActive : now
+            return a
+        }
+    }
+
     /// Fill in what each agent is saying (its title and question) from `hc get`.
     private static func addDetails(_ list: [AgentInfo], hc: String) -> [AgentInfo] {
         var out = list
@@ -319,6 +381,7 @@ final class AgentWatcher {
             out[i].title = obj["title"] as? String ?? ""
             out[i].message = status?["msg"] as? String ?? ""
             out[i].kind = status?["kind"] as? String ?? ""
+            out[i].lastActive = lastActive(obj)
             lock.unlock()
         }
         return out
@@ -348,7 +411,7 @@ final class AgentWatcher {
                     if app != self.appInstalled { Log.write("agents: Herdr app \(app ? "found" : "not installed")") }
                     self.status = found.status
                     self.appInstalled = app
-                    self.latest = found.agents
+                    self.latest = details ? found.agents : Self.carry(from: self.latest, into: found.agents)
                 }
                 done(self.latest)
             }
@@ -418,16 +481,48 @@ final class AgentWatcher {
 
 // MARK: - The ring
 
+/// How the wedges are put in order around the wheel.
+enum RingOrder: String, CaseIterable {
+    case space    // by space name: every agent keeps its place, and a space's sessions sit together
+    case recent   // whoever was active last comes first
+}
+
 final class RingModel: ObservableObject {
     /// One wedge of the wheel. Angles are radians, 0 pointing right, growing clockwise on screen.
+    /// `start`, `end` and `outer` are its size at rest; a quiet agent's wedge rests smaller.
     struct Slice: Identifiable {
         let agent: AgentInfo
         let start: Double
         let end: Double
         let inner: CGFloat
         let outer: CGFloat
+        /// 1 for an agent that was just active, down to 0 for one long quiet.
+        var fresh = 1.0
+        /// "5m ago", "3d ago"… for an agent that has gone quiet.
+        var ago: String?
+        /// How much each side and the rim grow while the wedge is pointed at, back to full size.
+        var widen = 0.0
+        var raise: CGFloat = 0
+        /// The wedge on that side is another session of the same space.
+        var joinsPrevious = false
+        var joinsNext = false
         var id: String { agent.id }
         var mid: Double { (start + end) / 2 }
+        var inFamily: Bool { joinsPrevious || joinsNext }
+        /// The rim while pointed at.
+        var reach: CGFloat { outer + raise }
+    }
+
+    /// The name of a space, written once over its sessions when several sit side by side.
+    struct Band: Identifiable, Equatable {
+        let id: String
+        let name: String
+        let start: Double
+        let end: Double
+        let radius: CGFloat      // at rest
+        let members: [String]
+        /// How far outside its wedges the middle of the band runs.
+        static let lift: CGFloat = 14
     }
 
     /// What the wheel says in its middle when it has no agents to show.
@@ -455,6 +550,8 @@ final class RingModel: ObservableObject {
     }
 
     @Published var slices: [Slice] = []
+    @Published var bands: [Band] = []
+    var order = RingOrder.space
     @Published var notice: Notice?
     /// True until Herdr has answered for the first time; the hub says it is looking.
     @Published var looking = false
@@ -520,7 +617,7 @@ final class RingModel: ObservableObject {
 
     var outerRadius: CGFloat = 250
 
-    func layout(_ agents: [AgentInfo]) {
+    func layout(_ agents: [AgentInfo], now: Date = Date()) {
         if heldNotice { return }
         looking = herdr == .unknown && agents.isEmpty
         switch herdr {
@@ -531,15 +628,16 @@ final class RingModel: ObservableObject {
         }
         // Without herdr-core there is nothing true to show, so don't leave old wedges up.
         let agents = (herdr == .notInstalled || herdr == .notRunning) ? [] : agents
-        let urgent = agents.filter { $0.needsYou }
-        let rest = agents.filter { !$0.needsYou }
-        hidden = max(0, rest.count - 12)
-        let all = urgent + rest.prefix(12)
+        let arranged = Self.arrange(agents, order: order)
+        hidden = arranged.hidden
+        let all = arranged.shown
         outerRadius = all.count > 9 ? 300 : (all.count > 6 ? 275 : 250)
-        guard !all.isEmpty else { slices = []; highlighted = nil; return }
+        guard !all.isEmpty else { slices = []; bands = []; highlighted = nil; return }
 
-        // Agents waiting on you get wider wedges that also reach further in, so they are the closest targets.
-        let weights = all.map { $0.needsYou ? 1.45 : 1.0 }
+        // Agents waiting on you get wider wedges that also reach further in, so they are the closest
+        // targets. Quiet ones narrow and pull in their rims, the more so the longer they have sat.
+        let fresh = all.map { $0.freshness(now: now) }
+        let weights = zip(all, fresh).map { a, f in a.needsYou ? 1.45 : Self.quietWidth + (1 - Self.quietWidth) * f }
         let unit = min(2 * Double.pi / weights.reduce(0, +), 2 * Double.pi / 3.2)
         let spans = weights.map { $0 * unit }
         let used = spans.reduce(0, +)
@@ -547,25 +645,92 @@ final class RingModel: ObservableObject {
         // Start so the first wedge (or the whole group, when it doesn't fill the circle) is centred at the top.
         var angle = -Double.pi / 2 - (full ? spans[0] / 2 : used / 2)
         var result: [Slice] = []
-        for (a, span) in zip(all, spans) {
-            result.append(Slice(agent: a, start: angle, end: angle + span,
-                                inner: a.needsYou ? 60 : 96, outer: a.needsYou ? outerRadius + 16 : outerRadius))
+        for (i, a) in all.enumerated() {
+            let span = spans[i]
+            var s = Slice(agent: a, start: angle, end: angle + span, inner: a.needsYou ? 60 : 96,
+                          outer: a.needsYou ? outerRadius + 16 : outerRadius - Self.quietDrop * CGFloat(1 - fresh[i]))
+            s.fresh = fresh[i]
+            s.ago = a.ago(now: now)
+            if !a.needsYou {
+                s.widen = max(0, unit - span) / 2
+                s.raise = outerRadius - s.outer
+            }
+            s.joinsPrevious = i > 0 && all[i - 1].space == a.space
+            s.joinsNext = i + 1 < all.count && all[i + 1].space == a.space
+            result.append(s)
             angle += span
         }
         slices = result
+
+        // One name over each run of sessions from the same space.
+        var named: [Band] = []
+        var i = 0
+        while i < result.count {
+            var j = i
+            while result[j].joinsNext { j += 1 }
+            if j > i {
+                let run = result[i...j]
+                named.append(Band(id: result[i].id, name: result[i].agent.space, start: result[i].start, end: result[j].end,
+                                  radius: (run.map { $0.outer }.max() ?? outerRadius) + Band.lift, members: run.map { $0.id }))
+            }
+            i = j + 1
+        }
+        bands = named
         if let h = highlighted, !result.contains(where: { $0.id == h }) { highlighted = nil }
+    }
+
+    /// Most agents that aren't waiting on you the wheel will show.
+    static let limit = 12
+    /// A long-quiet wedge's width as a share of a fresh one's, and how far its rim pulls in.
+    static let quietWidth = 0.55
+    static let quietDrop: CGFloat = 44
+
+    /// Which agents the wheel shows and in what order. Waiting agents always lead, and when there
+    /// are too many others the ones quiet the longest are left out.
+    static func arrange(_ agents: [AgentInfo], order: RingOrder) -> (shown: [AgentInfo], hidden: Int) {
+        // Waiting, then busy, then whoever went quiet last; an agent whose time isn't known goes after those.
+        func moreRecent(_ a: AgentInfo, _ b: AgentInfo) -> Bool {
+            let ka = a.needsYou ? 0 : (a.status == "working" ? 1 : 2), kb = b.needsYou ? 0 : (b.status == "working" ? 1 : 2)
+            if ka != kb { return ka < kb }
+            let ta = a.lastActive ?? .distantPast, tb = b.lastActive ?? .distantPast
+            if ta != tb { return ta > tb }
+            return (a.rank, a.space, a.tab, a.id) < (b.rank, b.space, b.tab, b.id)
+        }
+        let waiting = agents.filter { $0.needsYou }.count
+        let kept = Array(agents.sorted(by: moreRecent).prefix(waiting + limit))
+        let hidden = agents.count - kept.count
+        guard order == .space else { return (kept, hidden) }
+
+        func before(_ a: String, _ b: String) -> Bool? {
+            let c = a.compare(b, options: [.caseInsensitive, .numeric])
+            if c != .orderedSame { return c == .orderedAscending }
+            return a == b ? nil : a < b
+        }
+        // A space with someone waiting comes first and brings its other sessions along.
+        let urgentSpaces = Set(kept.filter { $0.needsYou }.map { $0.space })
+        let bySpace = kept.sorted { a, b in
+            let ua = urgentSpaces.contains(a.space), ub = urgentSpaces.contains(b.space)
+            if ua != ub { return ua }
+            if let first = before(a.space, b.space) { return first }
+            if a.needsYou != b.needsYou { return a.needsYou }
+            return before(a.tab, b.tab) ?? (a.id < b.id)
+        }
+        return (bySpace, hidden)
     }
 
     /// The agent the pointer is aiming at, given its offset from the centre (y down).
     func target(for p: CGSize) -> String? {
         guard hypot(p.width, p.height) > 46 else { return nil }
         let angle = atan2(Double(p.height), Double(p.width))
-        for s in slices {
-            var d = (angle - s.start).truncatingRemainder(dividingBy: 2 * .pi)
+        func holds(_ s: Slice, grown: Bool) -> Bool {
+            let extra = grown ? s.widen : 0
+            var d = (angle - (s.start - extra)).truncatingRemainder(dividingBy: 2 * .pi)
             if d < 0 { d += 2 * .pi }
-            if d < s.end - s.start { return s.id }
+            return d < s.end - s.start + 2 * extra
         }
-        return nil
+        // The wedge already pointed at has grown over the edges of its neighbours, so it is asked first.
+        if let h = slices.first(where: { $0.id == highlighted }), holds(h, grown: true) { return h.id }
+        return slices.first { holds($0, grown: false) }?.id
     }
 }
 
@@ -575,16 +740,97 @@ struct Wedge: Shape {
     var end: Double
     var inner: CGFloat
     var outer: CGFloat
-    var gap: CGFloat = 3.5
+    /// The gap on each side. Sessions of the same space are only a hairline apart.
+    var startGap: CGFloat = Wedge.gap
+    var endGap: CGFloat = Wedge.gap
+    static let gap: CGFloat = 3.5
+    static let hairline: CGFloat = 0.75
+
+    // Lets a wedge grow and shrink smoothly rather than jump.
+    var animatableData: AnimatablePair<AnimatablePair<Double, Double>, AnimatablePair<CGFloat, CGFloat>> {
+        get { AnimatablePair(AnimatablePair(start, end), AnimatablePair(inner, outer)) }
+        set { start = newValue.first.first; end = newValue.first.second; inner = newValue.second.first; outer = newValue.second.second }
+    }
 
     func path(in rect: CGRect) -> Path {
         let c = CGPoint(x: rect.midX, y: rect.midY)
-        let po = Double(gap / outer), pi = Double(gap / inner)
         var p = Path()
-        p.addArc(center: c, radius: outer, startAngle: .radians(start + po), endAngle: .radians(end - po), clockwise: false)
-        p.addArc(center: c, radius: inner, startAngle: .radians(end - pi), endAngle: .radians(start + pi), clockwise: true)
+        p.addArc(center: c, radius: outer, startAngle: .radians(start + Double(startGap / outer)),
+                 endAngle: .radians(end - Double(endGap / outer)), clockwise: false)
+        p.addArc(center: c, radius: inner, startAngle: .radians(end - Double(endGap / inner)),
+                 endAngle: .radians(start + Double(startGap / inner)), clockwise: true)
         p.closeSubpath()
         return p
+    }
+}
+
+/// Part of a circle's edge, for the band that names a space.
+struct Arc: Shape {
+    var start: Double
+    var end: Double
+    var radius: CGFloat
+
+    var animatableData: AnimatablePair<CGFloat, AnimatablePair<Double, Double>> {
+        get { AnimatablePair(radius, AnimatablePair(start, end)) }
+        set { radius = newValue.first; start = newValue.second.first; end = newValue.second.second }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        p.addArc(center: CGPoint(x: rect.midX, y: rect.midY), radius: radius,
+                 startAngle: .radians(start), endAngle: .radians(end), clockwise: false)
+        return p
+    }
+}
+
+/// A short name written along a circle, kept the right way up on the lower half.
+struct ArcText: View {
+    let text: String
+    let mid: Double       // the angle its middle sits at
+    let radius: CGFloat
+    let room: CGFloat     // how much of the circle's edge it may take up
+
+    static let size: CGFloat = 11
+    private static let font: NSFont = {
+        let base = NSFont.systemFont(ofSize: size, weight: .bold)
+        return base.fontDescriptor.withDesign(.rounded).flatMap { NSFont(descriptor: $0, size: size) } ?? base
+    }()
+
+    /// Each letter and how far along the edge its middle is from the middle of the text,
+    /// cut short with "…" when the whole name doesn't fit.
+    static func letters(_ text: String, room: CGFloat) -> [(letter: String, at: CGFloat)] {
+        func width(_ s: String) -> CGFloat { ceil((s as NSString).size(withAttributes: [.font: font]).width * 10) / 10 }
+        var chars = text.map { String($0) }
+        var widths = chars.map(width)
+        if widths.reduce(0, +) > room {
+            let dots = width("…")
+            while !chars.isEmpty, widths.reduce(0, +) + dots > room { chars.removeLast(); widths.removeLast() }
+            chars.append("…")
+            widths.append(dots)
+        }
+        var x = -widths.reduce(0, +) / 2
+        var out: [(letter: String, at: CGFloat)] = []
+        for (c, w) in zip(chars, widths) {
+            out.append((c, x + w / 2))
+            x += w
+        }
+        return out
+    }
+
+    var body: some View {
+        // Clockwise reads left to right along the top; along the bottom it is the other way round.
+        let flipped = sin(mid) > 0
+        let letters = Self.letters(text, room: room)
+        return ZStack {
+            ForEach(Array(letters.enumerated()), id: \.offset) { _, l in
+                let angle = mid + (flipped ? -1 : 1) * Double(l.at / radius)
+                Text(l.letter)
+                    .font(.system(size: Self.size, weight: .bold, design: .rounded))
+                    .fixedSize()
+                    .rotationEffect(.radians(angle + (flipped ? -Double.pi / 2 : Double.pi / 2)))
+                    .offset(x: CGFloat(cos(angle)) * radius, y: CGFloat(sin(angle)) * radius)
+            }
+        }
     }
 }
 
@@ -604,8 +850,12 @@ struct RingView: View {
                 } else {
                     ForEach(model.slices) { s in
                         slice(s, on: model.highlighted == s.id, t: t)
+                            .zIndex(model.highlighted == s.id ? 1 : 0)   // grown, it lies over its neighbours' edges
                     }
-                    hub
+                    ForEach(model.bands) { b in
+                        band(b).zIndex(2)
+                    }
+                    hub.zIndex(3)
                 }
                 if let b = model.bubble, let a = model.slices.first(where: { $0.id == model.highlighted })?.agent {
                     SpeechBubble(agent: a, bubble: b, model: model)
@@ -664,44 +914,87 @@ struct RingView: View {
         let a = s.agent, urgent = a.needsYou
         let pulse = 0.5 + 0.5 * sin(t * 4.2)
         let pop: CGFloat = on ? 16 : (urgent ? CGFloat(3 * pulse) : 0)
-        let shape = Wedge(start: s.start, end: s.end, inner: s.inner, outer: s.outer)
-        let rim = Wedge(start: s.start, end: s.end, inner: s.outer - 7, outer: s.outer)
+        // A quiet agent's wedge rests small and grey; pointing at it brings it back to full size and colour.
+        let fresh = on ? 1 : s.fresh
+        let start = s.start - (on ? s.widen : 0), end = s.end + (on ? s.widen : 0)
+        let outer = on ? s.reach : s.outer
+        let tint = a.color(freshness: fresh)
+        let startGap = s.joinsPrevious ? Wedge.hairline : Wedge.gap, endGap = s.joinsNext ? Wedge.hairline : Wedge.gap
+        let shape = Wedge(start: start, end: end, inner: s.inner, outer: outer, startGap: startGap, endGap: endGap)
+        let rim = Wedge(start: start, end: end, inner: outer - 7, outer: outer, startGap: startGap, endGap: endGap)
         let fill: AnyShapeStyle = urgent
             ? AnyShapeStyle(RadialGradient(colors: [Color(red: 1.0, green: 0.62, blue: 0.40), Palette.accent, Color(red: 0.93, green: 0.30, blue: 0.30)],
-                                           center: .center, startRadius: s.inner, endRadius: s.outer))
+                                           center: .center, startRadius: s.inner, endRadius: outer))
             : AnyShapeStyle(RadialGradient(colors: [Color(white: on ? 0.36 : 0.20), Color(white: on ? 0.26 : 0.11)],
-                                           center: .center, startRadius: s.inner, endRadius: s.outer))
-        let radius = s.inner + (s.outer - s.inner) * 0.54
-        let arcWidth = CGFloat(s.end - s.start) * radius
+                                           center: .center, startRadius: s.inner, endRadius: outer))
+        let radius = s.inner + (outer - s.inner) * 0.54
+        let arcWidth = CGFloat(end - start) * radius
         return ZStack {
             shape.fill(fill).opacity(urgent ? 1 : 0.95)
             if !urgent {
-                rim.fill(a.color).opacity(a.status == "working" ? 0.55 + 0.45 * pulse : 0.9)
+                rim.fill(tint).opacity(a.status == "working" ? 0.55 + 0.45 * pulse : 0.9)
             }
             shape.stroke(on ? Color.white : Color.white.opacity(urgent ? 0.5 : 0.10), lineWidth: on ? 3 : 1)
-            label(a, on: on, t: t, width: max(64, min(150, arcWidth - 26)))
+            // A wedge that rests too narrow for the usual label keeps just its picture and name.
+            label(a, on: on, t: t, width: max(arcWidth < 90 ? 44 : 64, min(150, arcWidth - 26)), tint: tint, fresh: fresh,
+                  family: s.inFamily, brief: arcWidth < 90, ago: s.ago)
                 .offset(x: CGFloat(cos(s.mid)) * radius, y: CGFloat(sin(s.mid)) * radius)
         }
         .shadow(color: urgent ? Palette.accent.opacity(0.45 + 0.4 * pulse) : .black.opacity(0.35), radius: urgent ? 16 : 6)
         .offset(x: CGFloat(cos(s.mid)) * pop, y: CGFloat(sin(s.mid)) * pop)
     }
 
-    private func label(_ a: AgentInfo, on: Bool, t: Double, width: CGFloat) -> some View {
+    private func label(_ a: AgentInfo, on: Bool, t: Double, width: CGFloat, tint: Color, fresh: Double,
+                       family: Bool, brief: Bool, ago: String?) -> some View {
         let urgent = a.needsYou
+        // A quiet agent says how long it has been quiet; its picture already says done or idle.
+        let state = ago ?? a.statusWord
+        // The band over a family already names the space, so each of its wedges says which session it is.
+        // A wedge too narrow for all that keeps only the time.
+        let detail = brief ? (ago ?? "") : (a.tab.isEmpty || (family && a.title.isEmpty) ? state : "\(a.tab) · \(state)")
         return VStack(spacing: 3) {
             icon(a, t: t)
                 .font(.system(size: urgent ? 30 : 25, weight: .semibold))
-                .foregroundStyle(urgent ? Color.white : a.color)
+                .foregroundStyle(urgent ? Color.white : tint)
                 .frame(height: urgent ? 36 : 30)
-            Text(a.space)
-                .font(.system(size: urgent ? 15.5 : 14, weight: .bold, design: .rounded))
-                .lineLimit(1).truncationMode(.middle)
-            Text(a.tab.isEmpty ? a.statusWord : "\(a.tab) · \(a.statusWord)")
-                .font(.system(size: 11.5, weight: .medium)).opacity(0.82).lineLimit(1)
+            if family {
+                Text(a.sessionName)
+                    .font(.system(size: urgent ? 13.5 : 12.5, weight: .bold, design: .rounded))
+                    .lineLimit(brief ? 1 : 2).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(a.space)
+                    .font(.system(size: urgent ? 15.5 : 14, weight: .bold, design: .rounded))
+                    .lineLimit(1).truncationMode(.middle)
+            }
+            if !detail.isEmpty {
+                // When both don't fit, the tab goes and the state or time stays.
+                ViewThatFits(in: .horizontal) {
+                    Text(detail).lineLimit(1).fixedSize()
+                    Text(state).lineLimit(1)
+                }
+                .font(.system(size: 11.5, weight: .medium)).opacity(0.82)
+            }
         }
         .foregroundStyle(.white)
         .frame(width: width)
-        .scaleEffect(on ? 1.08 : 1)
+        .opacity(0.55 + 0.45 * fresh)
+        .scaleEffect(on ? 1.08 : 0.86 + 0.14 * CGFloat(fresh))
+    }
+
+    /// The space's name on a dark strip just outside its sessions.
+    private func band(_ b: RingModel.Band) -> some View {
+        // When one of its sessions is pointed at, the band moves out with it rather than being covered.
+        let lifted = model.slices.first { $0.id == model.highlighted && b.members.contains($0.id) }
+        let radius = lifted.map { $0.reach + 16 + RingModel.Band.lift } ?? b.radius
+        let trim = Double(13 / radius)   // room for the strip's round ends
+        return ZStack {
+            Arc(start: b.start + trim, end: b.end - trim, radius: radius)
+                .stroke(Color(white: 0.09).opacity(0.92), style: StrokeStyle(lineWidth: 18, lineCap: .round))
+            ArcText(text: b.name, mid: (b.start + b.end) / 2, radius: radius,
+                    room: CGFloat(b.end - b.start - 2 * trim) * radius)
+                .foregroundStyle(Color.white.opacity(0.9))
+        }
+        .shadow(color: .black.opacity(0.35), radius: 4)
     }
 
     /// A little moving picture of what the agent is doing.
@@ -732,7 +1025,8 @@ struct RingView: View {
 
     private var hub: some View {
         let waiting = model.slices.filter { $0.agent.needsYou }.count
-        let focus = model.slices.first { $0.id == model.highlighted }?.agent
+        let pointed = model.slices.first { $0.id == model.highlighted }
+        let focus = pointed?.agent
         return VStack(spacing: 1) {
             if model.slices.isEmpty {
                 // Only seen for a moment: before herdr-core has answered for the first time.
@@ -740,6 +1034,9 @@ struct RingView: View {
                 Text(model.looking ? "agents…" : "running").font(.system(size: 11)).opacity(0.7)
             } else if let focus {
                 Text(focus.statusWord).font(.system(size: 13, weight: .bold, design: .rounded)).foregroundStyle(focus.needsYou ? Palette.accent : focus.color)
+                if let ago = pointed?.ago {
+                    Text(ago).font(.system(size: 10.5, weight: .medium)).opacity(0.85)
+                }
                 Text(focus.agent).font(.system(size: 10.5)).opacity(0.75).lineLimit(1)
                 Text(model.canJump ? "click to open" : "no Herdr app").font(.system(size: 9.5)).opacity(0.5)
             } else if waiting > 0 {
@@ -792,6 +1089,7 @@ struct SpeechBubble: View {
         let speech = agent.speech(full: bubble.expanded)
         let ink = Color(white: 0.10)
         let approval = agent.needsYou ? agent.permission : nil
+        let ago = model.slices.first { $0.id == agent.id }?.ago
         let heading = approval != nil
             ? "Needs approval" + (approval!.tool.isEmpty ? "" : " · \(approval!.tool)")
             : agent.needsYou
@@ -814,7 +1112,7 @@ struct SpeechBubble: View {
                 } else {
                     Circle().fill(agent.needsYou ? Palette.accent : agent.color).frame(width: 8, height: 8)
                 }
-                Text("\(agent.space.uppercased())  ·  \(heading.uppercased())")
+                Text("\(agent.space.uppercased())  ·  \(heading.uppercased())" + (ago.map { "  ·  \($0.uppercased())" } ?? ""))
                     .font(.system(size: 10, weight: .heavy)).kerning(0.5)
                     .foregroundStyle(agent.needsYou ? Palette.accent : Color(white: 0.4)).lineLimit(1)
             }
@@ -947,6 +1245,11 @@ final class AgentRing {
 
     var isOpen: Bool { timer != nil }
 
+    /// The side of the see-through window the wheel is drawn in, centred on the wheel. It has to
+    /// reach past the widest thing beside the biggest wheel (a bubble with a choice's explanation
+    /// next to it, or a bubble showing a whole long question) or that gets cut off at its edge.
+    static let canvas: CGFloat = 2200
+
     func show(_ agents: [AgentInfo], herdr: HerdrStatus, appInstalled: Bool) {
         model.herdr = herdr
         model.canJump = appInstalled
@@ -961,7 +1264,7 @@ final class AgentRing {
         model.bubble = nil
         model.active = true
         model.layout(agents)
-        let side = RingView.side
+        let side = Self.canvas
         let mouse = NSEvent.mouseLocation
         var origin = CGPoint(x: mouse.x - side / 2, y: mouse.y - side / 2)
         // Keep the ring's busy middle on screen.
@@ -984,7 +1287,7 @@ final class AgentRing {
             p.ignoresMouseEvents = true
             p.isReleasedWhenClosed = false
             p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
-            p.contentView = NSHostingView(rootView: RingView(model: model))
+            p.contentView = NSHostingView(rootView: RingView(model: model).frame(maxWidth: .infinity, maxHeight: .infinity))
             panel = p
         }
         panel?.setFrameOrigin(origin)
@@ -1072,7 +1375,7 @@ final class AgentRing {
         let metrics = RingModel.bubbleMetrics(for: s.agent, expanded: expanded)
         let size = metrics.size
         let dx = CGFloat(cos(s.mid)), dy = CGFloat(sin(s.mid))
-        let reach = s.outer + 54 + abs(dx) * size.width / 2 + abs(dy) * size.height / 2
+        let reach = s.reach + 54 + abs(dx) * size.width / 2 + abs(dy) * size.height / 2
         var pos = CGPoint(x: dx * reach, y: dy * reach)
         if expanded, let anchor { pos = CGPoint(x: anchor.x, y: anchor.bottom - size.height / 2) }
         // Keep it inside the screen the wheel is on.
@@ -1132,6 +1435,7 @@ final class AgentRing {
             model.bubble = nil
             model.hoveredOption = nil
             model.slices = []
+            model.bands = []
             model.notice = .noApp
             model.heldNotice = true
             pointerOnWheel = false

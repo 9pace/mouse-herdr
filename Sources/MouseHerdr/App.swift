@@ -59,6 +59,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let i = args.firstIndex(of: "--snapshot-ring"), i + 1 < args.count {
             let model = RingModel()
             model.canJump = !args.contains("--no-app")
+            // "--order space|recent" picks how the wedges are ordered.
+            if let j = args.firstIndex(of: "--order"), j + 1 < args.count {
+                guard let order = RingOrder(rawValue: args[j + 1]) else {
+                    print("unknown --order \(args[j + 1]); use space or recent")
+                    exit(2)
+                }
+                model.order = order
+            }
             var list: [AgentInfo] = []
             if let forced {
                 model.herdr = forced
@@ -67,14 +75,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 let out = Pipe(); p.standardOutput = out; try? p.run()
                 list = AgentWatcher.parse(out.fileHandleForReading.readDataToEndOfFile())
             } else {
-                let sample: [(String, String, String)] = [
-                    ("blocked", "payments-api", "review"), ("blocked", "mobile-app", "2"), ("done", "docs-site", "1"),
-                    ("working", "mouseherdr", "1"), ("working", "search-index", "bench"), ("done", "infra", "deploy"),
-                    ("idle", "playground", "3"), ("working", "web-client", "tests"),
+                // Status, space, tab, and how many minutes ago it was last active.
+                let sample: [(String, String, String, Double)] = [
+                    ("blocked", "payments-api", "review", 0), ("blocked", "mobile-app", "2", 0), ("done", "docs-site", "1", 3),
+                    ("working", "mouseherdr", "1", 0), ("working", "search-index", "bench", 0), ("done", "infra", "deploy", 50),
+                    ("idle", "playground", "3", 600), ("working", "web-client", "tests", 0), ("done", "mouseherdr", "2", 20),
                 ]
                 list = AgentWatcher.parse(try! JSONSerialization.data(withJSONObject: ["terminals": sample.enumerated().map { i, s in
                     ["address": "t\(i)", "agent": "claude-code", "status": s.0, "where": "\(s.1) / \(s.2)"]
                 }]))
+                let now = Date()
+                list = list.map { a in
+                    var a = a
+                    if let i = Int(a.id.dropFirst()) { a.lastActive = now.addingTimeInterval(-sample[i].3 * 60) }
+                    if a.space == "mouseherdr" { a.title = a.tab == "1" ? "Group sessions by space" : "Release notes" }
+                    return a
+                }
             }
             if forced != nil {
                 // Nothing to fill in: these states have no agents.
@@ -85,6 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     let out = Pipe(); p.standardOutput = out; try? p.run()
                     if let o = try? JSONSerialization.jsonObject(with: out.fileHandleForReading.readDataToEndOfFile()) as? [String: Any] {
                         a.title = o["title"] as? String ?? ""
+                        a.lastActive = AgentWatcher.lastActive(o)
                         a.message = (o["status"] as? [String: Any])?["msg"] as? String ?? ""
                         a.kind = (o["status"] as? [String: Any])?["kind"] as? String ?? ""
                         if a.needsYou { a.typeOption = 4 }
@@ -126,6 +143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if args.contains("--clicked"), !model.canJump {
                 // What a click on a wedge leaves behind when the Herdr app is missing.
                 model.slices = []
+                model.bands = []
                 model.highlighted = nil
                 model.notice = .noApp
             } else if args.contains("--plain") {
@@ -143,7 +161,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     let big = args.contains("--expanded")
                     let m = RingModel.bubbleMetrics(for: s.agent, expanded: big)
                     let dx = CGFloat(cos(s.mid)), dy = CGFloat(sin(s.mid))
-                    let reach = s.outer + 54 + abs(dx) * m.size.width / 2 + abs(dy) * m.size.height / 2
+                    let reach = s.reach + 54 + abs(dx) * m.size.width / 2 + abs(dy) * m.size.height / 2
                     model.bubble = RingModel.Bubble(offset: CGSize(width: dx * reach, height: dy * reach), size: m.size,
                                                     toward: CGSize(width: -dx, height: -dy), textHeight: m.textHeight, optionCount: m.options, expanded: big)
                     let hover = value("--hover")

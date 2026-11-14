@@ -163,6 +163,9 @@ final class AppState: ObservableObject {
     @Published var ringOnTap = UserDefaults.standard.object(forKey: "ringOnTap") as? Bool ?? true {
         didSet { UserDefaults.standard.set(ringOnTap, forKey: "ringOnTap") }
     }
+    @Published var ringOrder = RingOrder(rawValue: UserDefaults.standard.string(forKey: "ringOrder") ?? "") ?? .space {
+        didSet { UserDefaults.standard.set(ringOrder.rawValue, forKey: "ringOrder") }
+    }
     @Published var feelAgents = UserDefaults.standard.object(forKey: "feelAgents") as? Bool ?? true {
         didSet { UserDefaults.standard.set(feelAgents, forKey: "feelAgents") }
     }
@@ -494,6 +497,7 @@ final class AppState: ObservableObject {
     }
 
     private func openRing() {
+        ring.model.order = ringOrder
         ring.show(agents.latest, herdr: agents.status, appInstalled: agents.appInstalled)
         refreshRing()
         // Keep the wheel live while it is showing: agents change state, ask new questions, finish.

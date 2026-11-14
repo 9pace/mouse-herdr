@@ -404,6 +404,22 @@ struct AgentSidePanel: View {
             }
 
             Divider()
+            VStack(alignment: .leading, spacing: 6) {
+                Text("ORDER").font(.system(size: 10, weight: .semibold)).kerning(0.6).foregroundStyle(.tertiary)
+                Picker("", selection: $state.ringOrder) {
+                    Text("By space").tag(RingOrder.space)
+                    Text("Most recent").tag(RingOrder.recent)
+                }
+                .pickerStyle(.segmented).labelsHidden()
+                Text(state.ringOrder == .space
+                     ? "Each agent keeps its place, with a space's sessions side by side."
+                     : "Whoever was active last comes first.")
+                    .font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text("Either way, agents waiting on you lead, and quiet ones fade and shrink until you point at them.")
+                    .font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
             VStack(alignment: .leading, spacing: 4) {
                 Toggle("Feel when an agent needs me or finishes", isOn: $state.feelAgents)
                     .font(.system(size: 12.5, weight: .medium)).disabled(!state.hapticsOn || !state.hapticsAvailable)
