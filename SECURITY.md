@@ -14,10 +14,15 @@ MouseHerdr needs Accessibility to generate shortcuts and inspect or move windows
 Input Monitoring to communicate with the mouse. Only grant these permissions to a build
 you trust. The app does not run a network listener or include telemetry.
 
+To recognise the mouse, it reads what connected pointing devices report about themselves:
+vendor and product ids, name, connection type and number of buttons. This needs neither
+permission, opens no device and stays on your Mac.
+
 Agent integration invokes locally installed `hc` and `herdr-app` commands. Those commands
 must be trusted: they can read agent sessions and deliver input to them. Questions and
 terminal text are read into memory; typed answers are sent only when you choose to reply.
-Logs may contain application and workspace names, local paths and action metadata.
+Logs may contain application and workspace names, local paths, action metadata and the
+names of connected mice, which for a Bluetooth mouse can include its owner's name.
 
 The build creates a self-signed development identity under `signing/`. Its keychain uses a
 fixed local-development password; it is not a production certificate store. The directory

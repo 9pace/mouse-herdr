@@ -16,10 +16,13 @@ MOUSEHERDR_TEST_BINARY=dist/MouseHerdr.app/Contents/MacOS/MouseHerdr python3 scr
 ```
 
 The setup tests use Python 3's standard library. They exercise failed builds with an old
-binary present and Herdr being missing, failing, empty or unresponsive. They use temporary
-mock commands, do not connect to your real Herdr sessions, and do not start mouse remapping
-or request privacy permissions. Swift tests cover agent data parsing and mouse profiles.
-Use `shellcheck build.sh` if ShellCheck is installed.
+binary present, Herdr being missing, failing, empty or unresponsive, and how the packaged
+app recognises mice of several makers from the ids and names they report. They use
+temporary mock commands, do not connect to your real Herdr sessions, and do not start mouse
+remapping or request privacy permissions. Swift tests cover agent data parsing, mouse
+profiles and their drawings, which connected mouse is followed and what is said about it,
+and saved settings; they write only to temporary folders. Use `shellcheck build.sh` if
+ShellCheck is installed.
 
 GitHub Actions runs the tests and packages an ad-hoc signed app on Intel and Apple silicon
 macOS runners. These checks do not validate Bluetooth hardware, privacy permission prompts
@@ -66,13 +69,29 @@ version, mouse model and connection type you tested. Check the relevant behavior
 - Remapping: click, hold/release, gestures, thumb wheel, and ordinary left/right clicks.
 - Window dragging: move, drop, snap and cancel without leaving a window attached.
 - Reconnection: mouse off/on, Bluetooth disconnect/reconnect, and Mac sleep/wake.
+- Other mice: run `--detect-mice --watch 60` and plug a second mouse in and out; it should
+  be listed within a second and dropped when it leaves. In the app, check that the mouse is
+  named and drawn on the Buttons page, that the notice appears once, that its wheel click
+  opens the agent wheel, that **Change…** can follow another connected mouse and pick a
+  model by hand, and that an MX Master 4's buttons work again when it is followed again.
 - Quit: ordinary mouse behavior returns; reopen and check saved assignments.
 - Agent features: missing/stopped Herdr, no agents, viewing a question, sending an answer
   and focusing a terminal. Use a disposable agent session when sending test answers.
 - Update: reinstall with the same signing identity and check that permissions persist.
 
-Do not describe untested mice or macOS versions as supported. A new mouse profile should
-include evidence from the actual device; see [Adding a mouse](README.md#adding-a-mouse).
+Do not describe untested mice or macOS versions as supported. The project tells two kinds
+of mouse apart, and so should a pull request:
+
+- A **tested** mouse has a profile of its own, `tested: true`, and evidence from the actual
+  device: the output of `--detect-mice`, the log's `control cid=…` lines if it speaks
+  HID++, and the checks above.
+- A **recognised** mouse is a line in `Profiles/Catalog.swift`, built from published device
+  ids or the name the mouse reports. It may claim only what macOS reports for any mouse
+  (the wheel click, back and forward), or controls a Logitech mouse lists itself over
+  HID++. Say where each id comes from. The README calls these recognised, never supported
+  or tested.
+
+See [Adding a mouse](README.md#adding-a-mouse).
 
 ## Screenshots
 
@@ -83,13 +102,18 @@ dist/MouseHerdr.app/Contents/MacOS/MouseHerdr --snapshot /tmp/mouseherdr-window.
 dist/MouseHerdr.app/Contents/MacOS/MouseHerdr --snapshot /tmp/mouseherdr-buttons.png --tab buttons
 dist/MouseHerdr.app/Contents/MacOS/MouseHerdr --snapshot /tmp/mouseherdr-feel.png --tab feel
 dist/MouseHerdr.app/Contents/MacOS/MouseHerdr --snapshot /tmp/mouseherdr-generic.png --profile generic
+dist/MouseHerdr.app/Contents/MacOS/MouseHerdr --snapshot /tmp/mouseherdr-other-mouse.png --profile msBasicOptical --notice
+dist/MouseHerdr.app/Contents/MacOS/MouseHerdr --snapshot /tmp/mouseherdr-picker.png --picker
+dist/MouseHerdr.app/Contents/MacOS/MouseHerdr --snapshot-mice /tmp/mouseherdr-mice.png
 dist/MouseHerdr.app/Contents/MacOS/MouseHerdr --snapshot-ring /tmp/mouseherdr-agents.png
 dist/MouseHerdr.app/Contents/MacOS/MouseHerdr --snapshot-ring /tmp/mouseherdr-no-herdr.png --state not-installed --no-app
 dist/MouseHerdr.app/Contents/MacOS/MouseHerdr --snapshot-ring /tmp/mouseherdr-by-space.png --order space
 ```
 
 Avoid `--live` for public screenshots unless you have reviewed all visible session data.
-Review window snapshots too: they can use your saved button assignments and app paths.
+Review window snapshots too: they can use your saved button assignments and app paths. To
+draw them with the defaults instead, and leave your own settings and log alone, give the
+command an empty home folder: `CFFIXED_USER_HOME=/tmp/empty-home dist/…/MouseHerdr --snapshot …`.
 
 ## App icon
 
