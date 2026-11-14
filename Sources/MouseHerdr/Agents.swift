@@ -213,8 +213,10 @@ enum HerdrStatus: Equatable {
 /// Reads agent state from herdr-core (`hc`) and asks the Herdr app to show one.
 final class AgentWatcher {
     private let queue = DispatchQueue(label: "mm.agents", qos: .userInitiated)
-    /// Answers and jumps go on their own queue so a slow listing can't hold them up.
-    private let actions = DispatchQueue(label: "mm.agents.actions", qos: .userInitiated)
+    /// Answers and jumps go on their own queue so a slow listing can't hold them up. It runs them
+    /// side by side: herdr-core can hold an answer back for a long time (see `sendTimeout`), and
+    /// a jump, or an answer to another agent, must not wait behind it.
+    private let actions = DispatchQueue(label: "mm.agents.actions", qos: .userInitiated, attributes: .concurrent)
     private static let shells: Set<String> = ["zsh", "bash", "fish", "sh", "nu", "pwsh", "powershell", "dash", "ksh", "tcsh"]
     private(set) var latest: [AgentInfo] = []
     /// What the last fetch found out about Herdr itself. Read on the main thread.
@@ -229,6 +231,13 @@ final class AgentWatcher {
     static let appBundleID = "dev.herdr.app"
     /// How long any one `hc` or `herdr-app` call may take before it is given up on.
     static let timeout: TimeInterval = 4
+    /// Answers are allowed longer, because herdr-core holds them back on purpose. It presses keys
+    /// only once the terminal has been quiet for about 3 seconds, so an answer sent just after
+    /// someone typed there used to be given up on before it was delivered.
+    static let keysTimeout: TimeInterval = 10
+    /// Typed text waits for a person to send or clear a draft they left in that terminal, for up
+    /// to 60 seconds after their last key.
+    static let sendTimeout: TimeInterval = 70
 
     static func tool(_ name: String) -> String? {
         // Developer aid: MOUSEHERDR_HC / MOUSEHERDR_HERDR_APP name the exact file to use
@@ -470,12 +479,33 @@ final class AgentWatcher {
         }
     }
 
+    /// Agents with an answer on its way, by id. Main thread only.
+    private var answering: Set<String> = []
+
+    /// True if an answer to this agent may go now. While herdr-core is still holding the last
+    /// one, another would be delivered right after it and land on whatever the agent asks next.
+    private func beginAnswer(_ agent: AgentInfo) -> Bool {
+        guard answering.insert(agent.id).inserted else {
+            Log.write("agents: the last answer to \(agent.id) is still on its way; this one was not sent")
+            return false
+        }
+        return true
+    }
+
+    private func endAnswer(_ agent: AgentInfo) {
+        DispatchQueue.main.async { self.answering.remove(agent.id) }
+    }
+
     /// Answer the agent's question by pressing the number of the chosen option in its terminal.
     func answer(_ agent: AgentInfo, option: Int) {
+        guard beginAnswer(agent) else { return }
         Log.write("agents: answering \(agent.id) with option \(option + 1)")
         actions.async {
+            defer { self.endAnswer(agent) }
             guard let hc = Self.tool("hc") else { Log.write("agents: can't answer, hc is not installed"); return }
-            if Self.run(hc, ["keys", agent.id, "\(option + 1)"]) == nil { Log.write("agents: hc keys failed; the answer was not sent") }
+            if Self.run(hc, ["keys", agent.id, "\(option + 1)"], timeout: Self.keysTimeout) == nil {
+                Log.write("agents: hc keys failed; the answer was not sent")
+            }
         }
     }
 
@@ -485,12 +515,19 @@ final class AgentWatcher {
             Log.write("agents: can't type an answer to \(agent.id), its question has no free-text choice")
             return
         }
+        guard beginAnswer(agent) else { return }
         Log.write("agents: answering \(agent.id) with typed text (\(text.count) characters)")
         actions.async {
+            defer { self.endAnswer(agent) }
             guard let hc = Self.tool("hc") else { Log.write("agents: can't answer, hc is not installed"); return }
-            if Self.run(hc, ["keys", agent.id, "\(number)"]) == nil { Log.write("agents: hc keys failed; the answer was not sent"); return }
+            if Self.run(hc, ["keys", agent.id, "\(number)"], timeout: Self.keysTimeout) == nil {
+                Log.write("agents: hc keys failed; the answer was not sent")
+                return
+            }
             Thread.sleep(forTimeInterval: 0.7)
-            if Self.run(hc, ["send", "--force", agent.id, text]) == nil { Log.write("agents: hc send failed; the answer was not sent") }
+            if Self.run(hc, ["send", "--force", agent.id, text], timeout: Self.sendTimeout) == nil {
+                Log.write("agents: hc send failed; the answer was not sent")
+            }
         }
     }
 

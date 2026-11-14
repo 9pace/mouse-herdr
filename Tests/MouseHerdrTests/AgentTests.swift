@@ -452,4 +452,14 @@ final class AgentTests: XCTestCase {
         XCTAssertLessThan(cut.count, 29)
         XCTAssertLessThanOrEqual(cut.last!.at - cut.first!.at, 60)
     }
+
+    // herdr-core holds an answer back on purpose: keys until the terminal has been quiet for
+    // about 3 seconds, and typed text for up to 60 seconds after a person's last key while they
+    // have a draft there. An answer must not be given up on sooner than that.
+    func testAnswersAreAllowedLongerThanHerdrCoreMayHoldThem() {
+        XCTAssertGreaterThan(AgentWatcher.keysTimeout, 3)
+        XCTAssertGreaterThan(AgentWatcher.sendTimeout, 60)
+        // Looking at the agents stays quick, so a stuck herdr-core is noticed soon.
+        XCTAssertLessThan(AgentWatcher.timeout, AgentWatcher.keysTimeout)
+    }
 }
