@@ -213,18 +213,28 @@ final class ButtonTap {
             keyTap = port
             keySource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, port, 0)
             CFRunLoopAddSource(CFRunLoopGetMain(), keySource, .commonModes)
+            CGEvent.tapEnable(tap: port, enable: true)
+            escape.tapIs(on: true)
         }
         syncKeyTap()
     }
 
     /// The tap is on exactly while Escape is wanted, or one that was used has yet to be let go.
+    /// The system is asked only when that changes: each asking is a round trip to the window
+    /// server, made from the main thread.
     private func syncKeyTap() {
-        if let keyTap { CGEvent.tapEnable(tap: keyTap, enable: escape.needsTap) }
+        guard let keyTap, let on = escape.tapChange() else { return }
+        CGEvent.tapEnable(tap: keyTap, enable: on)
     }
 
     private func handleKey(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
         let pass = Unmanaged.passUnretained(event)
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            // Every switching-off is reported here, our own included. Switching it off again in
+            // answer would be reported again, and so on without end, with the main thread and the
+            // window server doing nothing else. So note that it is off, and turn it back on only
+            // if it is wanted.
+            escape.tapIs(on: false)
             syncKeyTap()
             return pass
         }
@@ -272,6 +282,21 @@ struct EscapeKey {
 
     /// Keys have to be looked at: Escape is wanted, or one that was used has yet to be let go.
     var needsTap: Bool { watching || held }
+
+    /// Whether the tap is on, as far as is known.
+    private(set) var tapOn = false
+
+    /// The tap was just made, which leaves it on, or the system says it has been switched off.
+    mutating func tapIs(on: Bool) { tapOn = on }
+
+    /// What to do to the tap: true to switch it on, false to switch it off, nil to leave it as
+    /// it is. Asking twice gives nil the second time, so being told of a switching-off that was
+    /// asked for does not lead to asking for it again.
+    mutating func tapChange() -> Bool? {
+        guard tapOn != needsTap else { return nil }
+        tapOn = needsTap
+        return tapOn
+    }
 
     /// Escape went down.
     mutating func pressed(repeating: Bool, plain: Bool) -> Verdict {

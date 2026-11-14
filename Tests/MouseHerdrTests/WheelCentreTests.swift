@@ -232,6 +232,48 @@ final class WheelCentreTests: XCTestCase {
         XCTAssertFalse(key.held)
     }
 
+    func testSwitchingTheKeyTapOffIsAskedForOnce() {
+        var key = EscapeKey()
+        XCTAssertNil(key.tapChange(), "nothing to watch for, and no tap yet")
+        key.watching = true                       // the wheel opens; the tap is made, which leaves it on
+        key.tapIs(on: true)
+        XCTAssertNil(key.tapChange())
+        key.watching = false                      // the wheel closes
+        XCTAssertEqual(key.tapChange(), false)
+        // The system reports that switching-off back to the tap. Answering it by switching the
+        // tap off again would be reported again, without end.
+        key.tapIs(on: false)
+        XCTAssertNil(key.tapChange())
+        XCTAssertNil(key.tapChange())
+        key.watching = true                       // the wheel opens again
+        XCTAssertEqual(key.tapChange(), true)
+        XCTAssertNil(key.tapChange())
+    }
+
+    func testAKeyTapTheSystemSwitchedOffIsSwitchedBackOnWhileTheWheelShows() {
+        var key = EscapeKey()
+        key.watching = true
+        key.tapIs(on: true)
+        key.tapIs(on: false)                      // the system gave up on it: it was too slow to answer
+        XCTAssertEqual(key.tapChange(), true)
+        // A report that arrives late, after the wheel opened again, costs one more switching-on
+        // and no more.
+        key.tapIs(on: false)
+        XCTAssertEqual(key.tapChange(), true)
+        XCTAssertNil(key.tapChange())
+    }
+
+    func testTheKeyTapStaysOnForTheReleaseOfAnEscapeThatWasUsed() {
+        var key = EscapeKey()
+        key.watching = true
+        key.tapIs(on: true)
+        XCTAssertEqual(key.pressed(repeating: false, plain: true), .ask)
+        key.watching = false                      // using it closed the wheel
+        XCTAssertNil(key.tapChange(), "still on: the release has yet to come")
+        XCTAssertTrue(key.released())
+        XCTAssertEqual(key.tapChange(), false)
+    }
+
     // MARK: The version in the window
 
     func testTheWindowSaysWhichCopyIsRunning() {
