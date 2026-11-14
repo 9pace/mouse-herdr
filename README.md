@@ -46,11 +46,16 @@ Click the GIF to watch **MouseHerdr: Welcome to My Herd** on YouTube
 - Tap the haptic panel to see your agents in a wheel around the pointer. Agents waiting on
   you are orange, wider, and closest.
 - Aim at one and click its wedge to jump to it in the Herdr app.
-- Several sessions in one Herdr space sit side by side under the space's name, each labelled
-  with what it is working on.
-- Agents that have been quiet for a while fade to grey and shrink, so the busy ones stand
-  out; point at one and it grows back. The Agents page chooses the order: by space (each
-  agent keeps its place) or most recently active first.
+- The most recently active agents come first. A busy agent says how long its turn has run
+  ("working 5m") and a quiet one how long ago it was active ("3h ago"). Quiet agents fade
+  to grey and get thinner and shorter, so the busy ones stand out; point at one and it
+  grows back.
+- Right-click a wedge to pin that agent: pinned agents stay near the front at full size.
+  The Agents page has a pin button on each agent too.
+- A small pill on a wedge counts the helpers that agent has started and that are still busy.
+- When a Herdr space has several sessions, each wedge also says what its session is about.
+  The Agents page can order the wheel by space instead, which keeps every agent in its
+  place and puts a space's sessions side by side under its name.
 - If it asked a question, a speech bubble shows it. Each offered choice is a button you can
   click to answer without leaving what you're doing; hovering a choice shows its
   explanation, and "Type your own answer…" opens a small text box.

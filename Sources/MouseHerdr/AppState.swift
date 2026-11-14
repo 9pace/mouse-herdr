@@ -163,8 +163,15 @@ final class AppState: ObservableObject {
     @Published var ringOnTap = UserDefaults.standard.object(forKey: "ringOnTap") as? Bool ?? true {
         didSet { UserDefaults.standard.set(ringOnTap, forKey: "ringOnTap") }
     }
-    @Published var ringOrder = RingOrder(rawValue: UserDefaults.standard.string(forKey: "ringOrder") ?? "") ?? .space {
+    @Published var ringOrder = RingOrder(rawValue: UserDefaults.standard.string(forKey: "ringOrder") ?? "") ?? .recent {
         didSet { UserDefaults.standard.set(ringOrder.rawValue, forKey: "ringOrder") }
+    }
+    /// Agents kept near the front of the wheel at full size, by terminal address.
+    @Published var pinnedAgents = Set(UserDefaults.standard.stringArray(forKey: "pinnedAgents") ?? []) {
+        didSet {
+            UserDefaults.standard.set(pinnedAgents.sorted(), forKey: "pinnedAgents")
+            ring.setPinned(pinnedAgents)
+        }
     }
     @Published var feelAgents = UserDefaults.standard.object(forKey: "feelAgents") as? Bool ?? true {
         didSet { UserDefaults.standard.set(feelAgents, forKey: "feelAgents") }
@@ -282,10 +289,13 @@ final class AppState: ObservableObject {
             Log.write("mouse button \(button) released")
             self.release(slot)
         }
-        tap.onPlainClick = { [weak self] in
+        tap.onPlainClick = { [weak self] right in
             guard let self else { return false }
-            // With the agent ring open, a click picks the agent being aimed at.
-            if self.ring.isOpen { self.ring.choose(); return true }
+            // With the agent ring open, a click picks the agent being aimed at and a right-click pins it.
+            if self.ring.isOpen {
+                if right { self.ring.pinAimed() } else { self.ring.choose() }
+                return true
+            }
             if self.replyBox.isOpen { return false }
             // A normal click drops a window that is being carried.
             guard self.stickyDrag else { return false }
@@ -307,6 +317,10 @@ final class AppState: ObservableObject {
         watchAgents()
         ring.onAim = { [weak self] in self?.buzz(.tick) }
         ring.onChoose = { [weak self] agent in self?.agents.focus(agent) }
+        ring.onPin = { [weak self] agent in
+            self?.togglePin(agent)
+            self?.buzz(.tick)
+        }
         ring.onType = { [weak self] agent, spot in
             guard let self else { return }
             self.replyBox.show(for: agent, at: spot) { text in self.agents.answer(agent, typed: text) }
@@ -463,6 +477,12 @@ final class AppState: ObservableObject {
 
     func focus(_ agent: AgentInfo) { agents.focus(agent) }
 
+    /// Pin an agent to the front of the wheel, or let it go again.
+    func togglePin(_ agent: AgentInfo) {
+        if pinnedAgents.contains(agent.id) { pinnedAgents.remove(agent.id) } else { pinnedAgents.insert(agent.id) }
+        Log.write("agents: \(pinnedAgents.contains(agent.id) ? "pinned" : "unpinned") \(agent.id) (\(agent.space) / \(agent.tab))")
+    }
+
     /// Answer an agent's question from the window with one of its offered choices.
     func answer(_ agent: AgentInfo, option: Int) {
         agents.answer(agent, option: option)
@@ -498,6 +518,7 @@ final class AppState: ObservableObject {
 
     private func openRing() {
         ring.model.order = ringOrder
+        ring.model.pinned = pinnedAgents
         ring.show(agents.latest, herdr: agents.status, appInstalled: agents.appInstalled)
         refreshRing()
         // Keep the wheel live while it is showing: agents change state, ask new questions, finish.

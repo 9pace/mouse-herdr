@@ -111,7 +111,8 @@ final class ButtonTap {
     /// Called when a remapped button is let go.
     var onRelease: ((Int) -> Void)?
     /// Called for ordinary left/right clicks. Return true to swallow the click.
-    var onPlainClick: (() -> Bool)?
+    /// An ordinary left or right click; return true to keep it from the app under the pointer.
+    var onPlainClick: ((_ right: Bool) -> Bool)?
     private var swallowUp = false
     /// Called when the thumb wheel is rolled (amount in lines). Return true to swallow the scroll.
     var onThumbWheel: ((Double) -> Bool)?
@@ -165,7 +166,7 @@ final class ButtonTap {
             return Unmanaged.passUnretained(event)
         }
         if type == .leftMouseDown || type == .rightMouseDown {
-            swallowUp = onPlainClick?() ?? false
+            swallowUp = onPlainClick?(type == .rightMouseDown) ?? false
             return swallowUp ? nil : Unmanaged.passUnretained(event)
         }
         if type == .leftMouseUp || type == .rightMouseUp {

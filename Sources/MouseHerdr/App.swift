@@ -67,6 +67,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
                 model.order = order
             }
+            // "--pin t3,t5" pins those agents.
+            if let j = args.firstIndex(of: "--pin"), j + 1 < args.count {
+                model.pinned = Set(args[j + 1].components(separatedBy: ","))
+            }
             var list: [AgentInfo] = []
             if let forced {
                 model.herdr = forced
@@ -89,6 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     var a = a
                     if let i = Int(a.id.dropFirst()) { a.lastActive = now.addingTimeInterval(-sample[i].3 * 60) }
                     if a.space == "mouseherdr" { a.title = a.tab == "1" ? "Group sessions by space" : "Release notes" }
+                    if a.id == "t4" { a.helpers = 3 }
                     return a
                 }
             }

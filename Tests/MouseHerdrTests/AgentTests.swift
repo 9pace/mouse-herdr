@@ -179,6 +179,108 @@ final class AgentTests: XCTestCase {
         XCTAssertEqual(model.slices.map(\.ago), [nil, "2h ago"])
     }
 
+    func testBusyAgentsSayHowLongTheirTurnHasRun() {
+        XCTAssertNil(agent("t1", "working", "a", quiet: 0.5).busyFor(now: now))
+        XCTAssertEqual(agent("t1", "working", "a", quiet: 5).busyFor(now: now), "5m")
+        XCTAssertEqual(agent("t1", "working", "a", quiet: 130).busyFor(now: now), "2h")
+        XCTAssertEqual(agent("t1", "working", "a", quiet: 60 * 50).busyFor(now: now), "2d")
+        XCTAssertNil(agent("t1", "working", "a").busyFor(now: now))
+        XCTAssertNil(agent("t1", "done", "a", quiet: 5).busyFor(now: now))
+
+        let model = RingModel()
+        model.herdr = .running(agents: 2)
+        model.layout([agent("t1", "working", "a", quiet: 12), agent("t2", "done", "b", quiet: 125)], now: now)
+        XCTAssertEqual(model.slices.map(\.busyFor), ["12m", nil])
+    }
+
+    func testBusyHelpersAreCountedForTheAgentThatStartedThem() throws {
+        let data = Data("""
+        {"terminals":[
+          {"address":"t1","agent":"claude-code","status":"working","where":"web / 1"},
+          {"address":"t2","agent":"claude-code","status":"working","where":"web / 1","parent":"t1"},
+          {"address":"t3","agent":"npm","where":"web / 1","parent":"t1"},
+          {"address":"t4","agent":"claude-code","status":"done","where":"web / 1","parent":"t1"},
+          {"address":"t5","agent":"zsh","where":"web / 1","parent":"t1"},
+          {"address":"t6","agent":"claude-code","status":"idle","where":"api / 1"}
+        ]}
+        """.utf8)
+        let agents = try XCTUnwrap(AgentWatcher.parseList(data))
+        let helpers = Dictionary(uniqueKeysWithValues: agents.map { ($0.id, $0.helpers) })
+        // The one still working and the plain program count; the finished one and the bare shell don't.
+        XCTAssertEqual(helpers["t1"], 2)
+        XCTAssertEqual(helpers["t2"], 0)
+        XCTAssertEqual(helpers["t6"], 0)
+    }
+
+    func testPinnedAgentsStayNearTheFrontAtFullSize() throws {
+        let list = [
+            agent("t1", "working", "a", quiet: 1), agent("t2", "done", "b", quiet: 60 * 48), agent("t3", "done", "c", quiet: 2),
+            agent("t4", "blocked", "d"), agent("t5", "done", "a", "2", quiet: 60 * 72),
+        ]
+        XCTAssertEqual(RingModel.arrange(list, order: .recent).shown.map(\.id), ["t4", "t1", "t3", "t2", "t5"])
+        // After anyone waiting, and in a fixed order among themselves however recent they are.
+        XCTAssertEqual(RingModel.arrange(list, order: .recent, pinned: ["t2", "t5"]).shown.map(\.id), ["t4", "t5", "t2", "t1", "t3"])
+        // By space, a pinned agent brings its space forward and leads it.
+        XCTAssertEqual(RingModel.arrange(list, order: .space, pinned: ["t5"]).shown.map(\.id), ["t4", "t5", "t1", "t2", "t3"])
+
+        // A pinned agent is never one of those left out for room.
+        var many = (0..<14).map { agent("q\($0)", "done", "s\($0)", quiet: Double(10 + $0)) }
+        many.append(agent("old", "done", "z", quiet: 60 * 24 * 30))
+        XCTAssertFalse(RingModel.arrange(many, order: .recent).shown.contains { $0.id == "old" })
+        let kept = RingModel.arrange(many, order: .recent, pinned: ["old"])
+        XCTAssertEqual(kept.shown.first?.id, "old")
+        XCTAssertEqual(kept.hidden, 2)
+
+        let model = RingModel()
+        model.herdr = .running(agents: 5)
+        model.pinned = ["t5"]
+        model.layout(list, now: now)
+        let pinned = try XCTUnwrap(model.slices.first { $0.id == "t5" })
+        let busy = try XCTUnwrap(model.slices.first { $0.id == "t1" })
+        XCTAssertTrue(pinned.pinned)
+        XCTAssertEqual(pinned.fresh, 1)
+        XCTAssertEqual(pinned.end - pinned.start, busy.end - busy.start, accuracy: 1e-9)
+        XCTAssertEqual(pinned.outer, busy.outer)
+        XCTAssertEqual(pinned.ago, "3d ago")   // it still says how long it has been quiet
+    }
+
+    func testQuietWedgesKeepGettingThinnerAndShorterDownToHalfHeight() throws {
+        let model = RingModel()
+        model.herdr = .running(agents: 6)
+        model.layout([
+            agent("busy", "working", "a", quiet: 300), agent("busy2", "working", "b"), agent("hour", "done", "c", quiet: 60),
+            agent("day", "done", "d", quiet: 60 * 24), agent("days", "idle", "e", quiet: 60 * 72), agent("month", "done", "f", quiet: 60 * 24 * 40),
+        ], now: now)
+        func slice(_ id: String) throws -> RingModel.Slice { try XCTUnwrap(model.slices.first { $0.id == id }) }
+        let ids = ["busy", "hour", "day", "days", "month"]
+        let widths = try ids.map { try slice($0).end - slice($0).start }
+        let rims = try ids.map { try slice($0).outer }
+        XCTAssertEqual(widths, widths.sorted(by: >))
+        XCTAssertEqual(Set(widths).count, 5)
+        XCTAssertEqual(rims, rims.sorted(by: >))
+        XCTAssertEqual(Set(rims).count, 5)
+        // Busy agents are all one width, however long they have been at it.
+        XCTAssertEqual(try slice("busy2").end - slice("busy2").start, widths[0], accuracy: 1e-9)
+        // The longest quiet is half as tall as a busy one, and no less.
+        let month = try slice("month"), busy = try slice("busy")
+        XCTAssertEqual(month.outer - month.inner, (busy.outer - busy.inner) / 2, accuracy: 1e-9)
+        XCTAssertEqual(widths[4] / widths[0], RingModel.quietWidth, accuracy: 1e-9)
+        // Colour is gone long before the size stops changing.
+        XCTAssertEqual(try slice("day").fresh, 0)
+    }
+
+    func testAnAgentThatJustWentQuietStartsAtFullSizeAndShrinksSlowly() {
+        XCTAssertEqual(agent("t1", "done", "a", quiet: 0).size(now: now), 1)
+        XCTAssertGreaterThan(agent("t1", "done", "a", quiet: 10).size(now: now), 0.98)
+        XCTAssertGreaterThan(agent("t1", "done", "a", quiet: 60).size(now: now), 0.95)
+        XCTAssertGreaterThan(agent("t1", "done", "a", quiet: 6 * 60).size(now: now), 0.85)
+        let day = agent("t1", "done", "a", quiet: 24 * 60).size(now: now)
+        XCTAssertTrue(0.6 < day && day < 0.85, "\(day)")
+        XCTAssertEqual(agent("t1", "idle", "a", quiet: 8 * 24 * 60).size(now: now), 0)
+        XCTAssertEqual(agent("t1", "working", "a", quiet: 8 * 24 * 60).size(now: now), 1)
+        XCTAssertEqual(agent("t1", "done", "a").size(now: now), 1)
+    }
+
     func testLastActiveComesFromTheStatusTime() {
         XCTAssertEqual(AgentWatcher.lastActive(["status_ms": 1_794_674_912_276]), Date(timeIntervalSince1970: 1_794_674_912.276))
         XCTAssertNil(AgentWatcher.lastActive(["status_ms": NSNull()]))
@@ -274,6 +376,7 @@ final class AgentTests: XCTestCase {
         var first = agent("t1", "working", "mouse", "1"), second = agent("t2", "done", "mouse", "2", quiet: 1)
         first.title = "Group the wheel"
         let named = agent("t4", "done", "mouse", "notes", quiet: 1)
+        model.order = .space
         model.layout([agent("t3", "done", "alone", quiet: 1), second, first, named], now: now)
         XCTAssertEqual(model.slices.map(\.id), ["t3", "t1", "t2", "t4"])
         XCTAssertEqual(model.slices.map(\.inFamily), [false, true, true, true])
@@ -288,12 +391,16 @@ final class AgentTests: XCTestCase {
         XCTAssertEqual(second.sessionName, "Tab 2")
         XCTAssertEqual(named.sessionName, "notes")
 
-        // Ordered by recency the same sessions may be apart, and then each stands alone.
+        XCTAssertFalse(model.slices.contains { $0.sibling })
+
+        // Ordered by recency there are no bands, even for sessions that land side by side;
+        // each wedge is marked so it can say what its own session is about.
         model.order = .recent
-        model.layout([first, agent("t3", "done", "alone", quiet: 1), agent("t2", "done", "mouse", "2", quiet: 30)], now: now)
-        XCTAssertEqual(model.slices.map(\.id), ["t1", "t3", "t2"])
+        model.layout([first, agent("t3", "done", "alone", quiet: 30), agent("t2", "done", "mouse", "2", quiet: 1)], now: now)
+        XCTAssertEqual(model.slices.map(\.id), ["t1", "t2", "t3"])
         XCTAssertTrue(model.bands.isEmpty)
         XCTAssertFalse(model.slices.contains { $0.inFamily })
+        XCTAssertEqual(model.slices.map(\.sibling), [true, true, false])
     }
 
     func testBandNameIsCutToFitItsRoom() {

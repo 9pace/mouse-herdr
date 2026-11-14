@@ -320,6 +320,13 @@ struct AgentsPage: View {
                     .foregroundStyle(urgent ? Color.white : a.color)
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(Capsule().fill(urgent ? AnyShapeStyle(Palette.accent) : AnyShapeStyle(a.color.opacity(0.14))))
+                Button { state.togglePin(a) } label: {
+                    Image(systemName: state.pinnedAgents.contains(a.id) ? "pin.fill" : "pin")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(state.pinnedAgents.contains(a.id) ? Palette.accent : Color.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help(state.pinnedAgents.contains(a.id) ? "Unpin from the front of the wheel" : "Pin to the front of the wheel")
                 if state.herdrApp {
                     Button { state.focus(a) } label: {
                         Image(systemName: "arrow.up.forward.app").font(.system(size: 13, weight: .semibold))
@@ -407,15 +414,15 @@ struct AgentSidePanel: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("ORDER").font(.system(size: 10, weight: .semibold)).kerning(0.6).foregroundStyle(.tertiary)
                 Picker("", selection: $state.ringOrder) {
-                    Text("By space").tag(RingOrder.space)
                     Text("Most recent").tag(RingOrder.recent)
+                    Text("By space").tag(RingOrder.space)
                 }
                 .pickerStyle(.segmented).labelsHidden()
                 Text(state.ringOrder == .space
-                     ? "Each agent keeps its place, with a space's sessions side by side."
+                     ? "Each agent keeps its place, with a space's sessions side by side under its name."
                      : "Whoever was active last comes first.")
                     .font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                Text("Either way, agents waiting on you lead, and quiet ones fade and shrink until you point at them.")
+                Text("Agents waiting on you lead, then the ones you pin. Quiet ones fade and shrink until you point at them. Right-click a wedge to pin it.")
                     .font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
 
