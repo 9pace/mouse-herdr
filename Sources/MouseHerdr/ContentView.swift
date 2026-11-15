@@ -29,6 +29,8 @@ struct ContentView: View {
                     Spacer(minLength: 0)
                 case .feel:
                     FeelPage(state: state)
+                case .settings:
+                    SettingsPage(state: state, updates: state.updates)
                 }
                 footer
             }
@@ -42,6 +44,7 @@ struct ContentView: View {
                 case .buttons:
                     if state.choosingMouse { MousePickerPanel(state: state) } else { DetailPanel(state: state) }
                 case .feel: HapticsSidePanel(state: state)
+                case .settings: UpdateHelpPanel()
                 }
             }
             .frame(width: 310)
@@ -77,6 +80,7 @@ struct ContentView: View {
         case .agents: return "See and answer your coding agents from the mouse."
         case .buttons: return "Pick a button, then choose what it does."
         case .feel: return "How the mouse talks back to your hand."
+        case .settings: return "Keep MouseHerdr ready for your day."
         }
     }
 
@@ -108,6 +112,7 @@ struct ContentView: View {
             tabButton(.agents, "Agents", "circle.hexagongrid.fill")
             tabButton(.buttons, "Buttons", "computermouse.fill")
             tabButton(.feel, "Feel", "waveform")
+            tabButton(.settings, "Settings", "gearshape.fill")
         }
         .padding(4)
         .background(Capsule().fill(Color.primary.opacity(0.06)))
@@ -220,9 +225,7 @@ struct ContentView: View {
 
     private var footer: some View {
         HStack {
-            Toggle("Start MouseHerdr when I log in", isOn: Binding(
-                get: { state.launchAtLogin }, set: { state.setLaunchAtLogin($0) }))
-                .toggleStyle(.checkbox).font(.system(size: 12))
+            UpdateFooter(updates: state.updates)
             Spacer()
             if state.tab == .buttons {
                 Button("Reset to defaults") { state.resetAll() }

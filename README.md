@@ -202,6 +202,22 @@ then run `shasum -a 256 -c MouseHerdr.zip.sha256` in that directory.
 
 Maintainers: [release signing setup](docs/release-signing.md).
 
+### Automatic updates
+
+Signed releases check for updates daily and download them in the background by default.
+When an update is ready, choose **Restart to Update** in the menu bar or **Settings**.
+The update also installs when you next quit MouseHerdr. Your assignments and settings
+stay saved, and **What’s New** opens after the update with offline release notes.
+
+In **Settings**, uncheck **Automatically check for and download updates** to stop future
+automatic checks and downloads. An already prepared update still installs on quit.
+**Check for Updates…** remains available for manual checks. **What’s New…** is also
+available from the menu bar and Settings.
+
+Updates use Sparkle to verify the signed feed and download before installing the signed
+app. Source and ad-hoc builds do not auto-update to public releases.
+Older releases without the updater need one manual download to get this feature.
+
 ### Build from source
 
 Install Apple's command line tools if you have not already, then finish the installer:
@@ -220,7 +236,7 @@ cd mouse-herdr
 
 This builds the app, copies it to `/Applications/MouseHerdr.app` and starts it. The first
 start opens the window; after that it starts quietly in the menu bar and at login.
-You can turn off **Start MouseHerdr when I log in** in the window. Run the build as your
+You can turn off **Start MouseHerdr when I log in** in Settings. Run the build as your
 normal user, without `sudo`; if Applications needs administrator approval, copy
 `dist/MouseHerdr.app` there with Finder and open it.
 

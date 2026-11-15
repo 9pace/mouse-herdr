@@ -12,7 +12,8 @@ from urllib.request import Request, urlopen
 
 
 BUILD_INPUTS = {"Package.swift", "Package.resolved", "build.sh", "VERSION",
-                "scripts/sign_release.py"}
+                "scripts/sign_release.py", "scripts/bundle_signing.py",
+                "scripts/update_feed.py", "scripts/verify_update.swift"}
 DOC_SUFFIXES = {".md", ".markdown", ".rst", ".adoc"}
 
 

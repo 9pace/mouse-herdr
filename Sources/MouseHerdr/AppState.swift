@@ -187,7 +187,8 @@ final class AppState: ObservableObject {
     }
     /// Whether herdr-core and the Herdr app are there; both are optional and re-checked as the app runs.
     /// The window's three pages. Agents comes first: it is what the app is for.
-    enum Tab: String, CaseIterable { case agents, buttons, feel }
+    enum Tab: String, CaseIterable { case agents, buttons, feel, settings }
+    let updates = UpdateManager()
     @Published var tab: Tab = .agents
     /// The agents as last seen, with their questions, for the Agents page.
     @Published var agentList: [AgentInfo] = []

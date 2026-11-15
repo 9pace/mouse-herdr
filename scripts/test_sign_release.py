@@ -21,6 +21,10 @@ class SigningTests(unittest.TestCase):
         binary = self.app / "Contents/MacOS/MouseHerdr"
         binary.parent.mkdir(parents=True)
         binary.write_bytes(b"test executable")
+        framework = self.app / "Contents/Frameworks/Sparkle.framework/Versions/B"
+        for relative in ["XPCServices/Downloader.xpc", "XPCServices/Installer.xpc", "Updater.app"]:
+            (framework / relative).mkdir(parents=True)
+        (framework / "Autoupdate").write_bytes(b"test helper")
         self.credentials = dict.fromkeys(SECRET_NAMES, "private-test-value")
         self.credentials["MACOS_CERTIFICATE_P12"] = base64.b64encode(b"test p12").decode()
         self.credentials["APPLE_TEAM_ID"] = "TEAM"
@@ -73,6 +77,23 @@ class SigningTests(unittest.TestCase):
         self.assertTrue(self.called("xcrun", "stapler", "validate"))
         self.assertTrue(self.called("spctl", "--assess"))
         self.assert_cleanup()
+
+    def test_nested_helpers_are_signed_inside_out_before_the_app(self):
+        self.sign()
+        signing = [c for c in self.commands if c[:2] == ("codesign", "--force")]
+        self.assertEqual([Path(c[-1]).name for c in signing],
+                         ["Downloader.xpc", "Installer.xpc", "Autoupdate", "Updater.app",
+                          "Sparkle.framework", "MouseHerdr.app"])
+        for command in signing[:-1]:
+            self.assertIn("--preserve-metadata=identifier,entitlements", command)
+            self.assertIn("--timestamp", command)
+        self.assertTrue(self.called("codesign", "--verify", "--deep", "--strict", "--all-architectures"))
+
+    def test_incomplete_framework_stops_before_credentials_are_used(self):
+        (self.app / "Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate").unlink()
+        with self.assertRaisesRegex(ValueError, "incomplete"):
+            self.sign()
+        self.assertEqual(self.commands, [])
 
     def test_rejected_or_incomplete_notarization_never_reaches_stapling(self):
         for status in ["Invalid", "In Progress", None]:
