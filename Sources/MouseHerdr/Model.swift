@@ -4,7 +4,12 @@ import Foundation
 // MARK: - Logging
 
 enum Log {
-    static let url: URL = {
+    /// The file that is written to.
+    static var url: URL { override ?? standard }
+    /// Another file to write to instead. Tests name one, so that a test run writes nothing into
+    /// the log of the copy that is really running.
+    static var override: URL?
+    private static let standard: URL = {
         let dir = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0].appendingPathComponent("Logs")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let u = dir.appendingPathComponent("MouseHerdr.log")
@@ -18,8 +23,12 @@ enum Log {
         let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"; return f
     }()
 
+    /// Wait until everything written so far is in the file.
+    static func drain() { queue.sync {} }
+
     static func write(_ s: String) {
         let line = "\(fmt.string(from: Date())) \(s)\n"
+        let url = url       // where it goes is settled now, not when its turn to be written comes
         queue.async {
             guard let data = line.data(using: .utf8) else { return }
             if let h = try? FileHandle(forWritingTo: url) {

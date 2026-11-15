@@ -23,8 +23,15 @@ app recognises mice of several makers from the ids and names they report. They u
 temporary mock commands, do not connect to your real Herdr sessions, and do not start mouse
 remapping or request privacy permissions. Swift tests cover agent data parsing, mouse
 profiles and their drawings, which connected mouse is followed and what is said about it,
-and saved settings; they write only to temporary folders. Use `shellcheck build.sh` if
-ShellCheck is installed.
+answering an agent from the wheel, and saved settings; they write only to temporary
+folders. Use `shellcheck build.sh` if ShellCheck is installed.
+
+One Swift test, in `WheelAnswerTests`, checks answering against herdr-core itself: that an
+answer is held back while the pointer moves over the agent's pane, goes in once it rests,
+and is called sent only then. It runs when `hc` is installed, takes a few seconds, and is
+skipped otherwise. It starts a herdr-core of its own under `/tmp`, with its own session
+name and a stand-in agent, and stops it afterwards; it does not connect to your real Herdr
+sessions.
 
 GitHub Actions runs the tests and packages an ad-hoc signed app on Intel and Apple silicon
 macOS runners. These checks do not validate Bluetooth hardware, privacy permission prompts

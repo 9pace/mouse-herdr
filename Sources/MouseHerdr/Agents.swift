@@ -231,13 +231,44 @@ final class AgentWatcher {
     static let appBundleID = "dev.herdr.app"
     /// How long any one `hc` or `herdr-app` call may take before it is given up on.
     static let timeout: TimeInterval = 4
-    /// Answers are allowed longer, because herdr-core holds them back on purpose. It presses keys
-    /// only once the terminal has been quiet for about 3 seconds, so an answer sent just after
-    /// someone typed there used to be given up on before it was delivered.
-    static let keysTimeout: TimeInterval = 10
+    /// An answer is waited for far longer than a look, because herdr-core holds it back on
+    /// purpose: it presses keys only once the terminal has had about 3 seconds with no input from
+    /// a person. Pointer movement over the agent's pane is such input when the agent has asked its
+    /// terminal to report it, as Claude Code does, so a key can be held for as long as the pointer
+    /// keeps moving there.
+    ///
+    /// Giving up does not take the answer back. herdr-core keeps the key and presses it once the
+    /// terminal goes quiet, whether or not whoever asked is still there. So this is only how long
+    /// MouseHerdr waits to hear what became of an answer, and it waits as long as it sensibly can:
+    /// until it hears, it must not say the answer was sent, nor that it was not, nor send another.
+    static let keysTimeout: TimeInterval = 120
     /// Typed text waits for a person to send or clear a draft they left in that terminal, for up
     /// to 60 seconds after their last key.
     static let sendTimeout: TimeInterval = 70
+
+    /// What became of an answer.
+    enum Delivery: Equatable {
+        /// herdr-core pressed the key. `late` is true when the agent had stopped waiting by then,
+        /// so the key went to whatever it was showing instead of to the question.
+        case delivered(late: Bool)
+        /// It did not go: `hc` is missing, or herdr-core said no.
+        case failed
+        /// MouseHerdr stopped waiting. herdr-core still has the key, and presses it once the
+        /// terminal has been left alone.
+        case stillHeld
+        /// Not sent, because the answer before it is still on its way to this agent.
+        case refused
+    }
+
+    /// How a command went.
+    enum Ran: Equatable {
+        /// It finished, and printed this.
+        case output(Data)
+        /// It could not be started, or finished saying that it had failed.
+        case failed
+        /// It was still going when its time ran out.
+        case gaveUp
+    }
 
     static func tool(_ name: String) -> String? {
         // Developer aid: MOUSEHERDR_HC / MOUSEHERDR_HERDR_APP name the exact file to use
@@ -265,6 +296,13 @@ final class AgentWatcher {
     /// Run a command and return what it printed, or nil if it failed or took too long.
     /// Never call this on the main thread.
     static func run(_ path: String, _ args: [String], timeout: TimeInterval = AgentWatcher.timeout) -> Data? {
+        if case .output(let data) = launch(path, args, timeout: timeout) { return data }
+        return nil
+    }
+
+    /// Run a command and say how it went: what it printed, that it failed, or that it was given
+    /// up on. Never call this on the main thread.
+    static func launch(_ path: String, _ args: [String], timeout: TimeInterval = AgentWatcher.timeout) -> Ran {
         final class Box { var data = Data() }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
@@ -275,7 +313,7 @@ final class AgentWatcher {
         p.standardInput = FileHandle.nullDevice
         do { try p.run() } catch {
             Log.write("agents: could not start \(path): \(error.localizedDescription)")
-            return nil
+            return .failed
         }
         // Read on another thread so a command that never finishes can't keep us waiting.
         let box = Box(), finished = DispatchSemaphore(value: 0)
@@ -294,9 +332,9 @@ final class AgentWatcher {
             }
             let name = ([(path as NSString).lastPathComponent] + args.prefix(2)).joined(separator: " ")
             Log.write("agents: \(name) did not answer within \(Int(timeout)) seconds; gave up")
-            return nil
+            return .gaveUp
         }
-        return p.terminationStatus == 0 ? box.data : nil
+        return p.terminationStatus == 0 ? .output(box.data) : .failed
     }
 
     static func parse(_ data: Data) -> [AgentInfo] { parseList(data) ?? [] }
@@ -535,55 +573,114 @@ final class AgentWatcher {
         }
     }
 
-    /// Agents with an answer on its way, by id. Main thread only.
-    private var answering: Set<String> = []
+    /// The agents with an answer on its way, and which of their choices it is (counted from 0),
+    /// by id. Main thread only.
+    private(set) var answering: [String: Int] = [:]
 
     /// True if an answer to this agent may go now. While herdr-core is still holding the last
     /// one, another would be delivered right after it and land on whatever the agent asks next.
-    private func beginAnswer(_ agent: AgentInfo) -> Bool {
-        guard answering.insert(agent.id).inserted else {
+    private func beginAnswer(_ agent: AgentInfo, option: Int) -> Bool {
+        guard answering[agent.id] == nil else {
             Log.write("agents: the last answer to \(agent.id) is still on its way; this one was not sent")
             return false
         }
+        answering[agent.id] = option
         return true
     }
 
-    private func endAnswer(_ agent: AgentInfo) {
-        DispatchQueue.main.async { self.answering.remove(agent.id) }
+    /// The answer is no longer on its way; tell whoever sent it what became of it.
+    private func endAnswer(_ agent: AgentInfo, _ outcome: Delivery, _ done: ((Delivery) -> Void)?) {
+        DispatchQueue.main.async {
+            self.answering[agent.id] = nil
+            done?(outcome)
+        }
+    }
+
+    /// What became of a key, going by how `hc keys` went.
+    ///
+    /// When it finishes, herdr-core has pressed the key, and it names the agent's status at that
+    /// moment: an agent that was no longer waiting on a person by then did not get the key as an
+    /// answer to its question. When it is given up on, the key has not been pressed and has not
+    /// been dropped either: herdr-core presses it once the terminal goes quiet.
+    static func delivery(of ran: Ran) -> Delivery {
+        switch ran {
+        case .output(let data):
+            let status = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["status"] as? String
+            return .delivered(late: status != "blocked" && status != "error")
+        case .failed:
+            return .failed
+        case .gaveUp:
+            return .stillHeld
+        }
+    }
+
+    /// Press one key in the agent's terminal and wait to hear what became of it.
+    /// Never call this on the main thread.
+    static func press(_ key: String, in agent: AgentInfo, timeout: TimeInterval = AgentWatcher.keysTimeout) -> Delivery {
+        guard let hc = tool("hc") else {
+            Log.write("agents: can't answer, hc is not installed")
+            return .failed
+        }
+        let asked = Date()
+        let outcome = delivery(of: launch(hc, ["keys", agent.id, key], timeout: timeout))
+        switch outcome {
+        case .delivered(let late):
+            let waited = Date().timeIntervalSince(asked)
+            if waited >= 1 {
+                Log.write(String(format: "agents: herdr-core held the answer to \(agent.id) for %.1f seconds before pressing it", waited))
+            }
+            if late { Log.write("agents: the answer to \(agent.id) went in after it had stopped asking") }
+        case .failed:
+            Log.write("agents: hc keys failed; the answer was not sent")
+        case .stillHeld:
+            // Not "not sent": it will still be pressed, and may land on whatever is asked by then.
+            Log.write("agents: herdr-core still holds the answer to \(agent.id), and presses it once that terminal has been left alone")
+        case .refused:
+            break
+        }
+        return outcome
     }
 
     /// Answer the agent's question by pressing the number of the chosen option in its terminal.
-    func answer(_ agent: AgentInfo, option: Int) {
-        guard beginAnswer(agent) else { return }
+    /// `done` is told what became of the answer, on the main thread: at once if it could not be
+    /// sent, and otherwise only when herdr-core has pressed the key, which can be seconds later.
+    /// Call it on the main thread.
+    func answer(_ agent: AgentInfo, option: Int, then done: ((Delivery) -> Void)? = nil) {
+        guard beginAnswer(agent, option: option) else { done?(.refused); return }
         Log.write("agents: answering \(agent.id) with option \(option + 1)")
         actions.async {
-            defer { self.endAnswer(agent) }
-            guard let hc = Self.tool("hc") else { Log.write("agents: can't answer, hc is not installed"); return }
-            if Self.run(hc, ["keys", agent.id, "\(option + 1)"], timeout: Self.keysTimeout) == nil {
-                Log.write("agents: hc keys failed; the answer was not sent")
-            }
+            self.endAnswer(agent, Self.press("\(option + 1)", in: agent), done)
         }
     }
 
     /// Answer in the person's own words: pick the dialog's free-text choice, then type the text.
-    func answer(_ agent: AgentInfo, typed text: String) {
+    func answer(_ agent: AgentInfo, typed text: String, then done: ((Delivery) -> Void)? = nil) {
         guard let number = agent.typeOption else {
             Log.write("agents: can't type an answer to \(agent.id), its question has no free-text choice")
+            done?(.failed)
             return
         }
-        guard beginAnswer(agent) else { return }
+        guard beginAnswer(agent, option: number - 1) else { done?(.refused); return }
         Log.write("agents: answering \(agent.id) with typed text (\(text.count) characters)")
         actions.async {
-            defer { self.endAnswer(agent) }
-            guard let hc = Self.tool("hc") else { Log.write("agents: can't answer, hc is not installed"); return }
-            if Self.run(hc, ["keys", agent.id, "\(number)"], timeout: Self.keysTimeout) == nil {
-                Log.write("agents: hc keys failed; the answer was not sent")
-                return
+            var outcome = Self.press("\(number)", in: agent)
+            // The text goes only into the box that the free-text choice opens. If that choice did
+            // not go in as an answer, there is no box, and the text would be typed somewhere else.
+            if outcome == .delivered(late: false), let hc = Self.tool("hc") {
+                Thread.sleep(forTimeInterval: 0.7)
+                switch Self.launch(hc, ["send", "--force", agent.id, text], timeout: Self.sendTimeout) {
+                case .output:
+                    break
+                case .failed, .gaveUp:
+                    // Unlike a key, text whose sender has gone is dropped by herdr-core, so giving
+                    // up on it does mean it was not typed.
+                    Log.write("agents: hc send failed; the answer was not sent")
+                    outcome = .failed
+                }
+            } else if outcome == .delivered(late: true) {
+                Log.write("agents: \(agent.id) had stopped asking, so the typed answer was not sent")
             }
-            Thread.sleep(forTimeInterval: 0.7)
-            if Self.run(hc, ["send", "--force", agent.id, text], timeout: Self.sendTimeout) == nil {
-                Log.write("agents: hc send failed; the answer was not sent")
-            }
+            self.endAnswer(agent, outcome, done)
         }
     }
 
@@ -738,15 +835,64 @@ final class RingModel: ObservableObject {
         var hintOnLeft = false // which side of the bubble has room for a choice's explanation
     }
 
-    /// Which answer button the pointer is over, and which one was just sent.
+    /// Which answer button the pointer is over, and which one was picked.
     @Published var hoveredOption: Int?
     @Published var sentOption: Int?
+    /// What became of the answer that was picked; nil while it is on its way. herdr-core presses
+    /// the key only once the agent's terminal has been left alone for a few seconds, so an answer
+    /// can be picked seconds before the agent gets it. The bubble says it was sent only once it was.
+    @Published var delivery: AgentWatcher.Delivery?
+    /// The answer has been on its way for long enough that herdr-core must be holding it back.
+    @Published var held = false
+    /// The wheel was asked to close while an answer was on its way; it goes once that is in.
+    @Published var leaving = false
     /// The agents have been looked at since the wheel opened. Until then a question on show is
     /// the one last seen, which the agent may have moved on from, so it can be read but not
     /// answered: an answer is sent as a key press, and it must land on the question that is shown.
     @Published var confirmed = false
-    /// An answer can be sent now.
-    var canAnswer: Bool { confirmed && sentOption == nil }
+    /// An answer can be sent now: the question is the current one and no answer is on its way.
+    /// Another sent while one is on its way would be pressed right after it, on whatever the
+    /// agent asks next. One that could not be sent can be tried again.
+    var canAnswer: Bool { confirmed && (sentOption == nil || delivery == .failed) }
+
+    /// How long an answer is on its way before the bubble says that it is being held back.
+    static let heldAfter: TimeInterval = 1.2
+
+    /// How the button of one of the choices looks.
+    enum ButtonState: Equatable {
+        case resting
+        /// Picked, and on its way: herdr-core has not pressed the key yet.
+        case sending
+        /// herdr-core pressed the key.
+        case sent
+        /// It could not be sent.
+        case failed
+    }
+
+    func buttonState(_ option: Int) -> ButtonState {
+        guard sentOption == option else { return .resting }
+        switch delivery {
+        case nil, .stillHeld, .refused: return .sending
+        case .delivered: return .sent
+        case .failed: return .failed
+        }
+    }
+
+    /// What the bubble says about the answer that was picked, or nil when none was.
+    var answerNote: String? {
+        guard sentOption != nil else { return nil }
+        switch delivery {
+        case nil, .refused:
+            if leaving { return "Sending… the wheel closes once it has gone in" }
+            return held ? "herdr-core sends it once that terminal has been quiet for 3 s…" : "Sending…"
+        case .delivered(let late):
+            return late ? "Sent, but the agent had already moved on" : "Sent — waiting for the agent…"
+        case .failed:
+            return "Could not send it — click an answer to try again"
+        case .stillHeld:
+            return "Still held by herdr-core until that terminal is quiet"
+        }
+    }
 
     // Bubble layout, shared by drawing and hit-testing.
     static let bubbleWidth: CGFloat = 400
@@ -1057,14 +1203,18 @@ struct RingView: View {
                 if let notice = model.notice {
                     noticeCard(notice)
                 } else {
+                    // A wheel that is only waiting for an answer to go in before it closes steps back,
+                    // leaving the bubble that says so.
+                    let fade = model.leaving ? 0.3 : 1.0
                     ForEach(model.slices) { s in
                         slice(s, on: model.highlighted == s.id, t: t)
+                            .opacity(fade)
                             .zIndex(model.highlighted == s.id ? 1 : 0)   // grown, it lies over its neighbours' edges
                     }
                     ForEach(model.bands) { b in
-                        band(b).zIndex(2)
+                        band(b).opacity(fade).zIndex(2)
                     }
-                    hub.zIndex(3)
+                    hub.opacity(fade).zIndex(3)
                 }
                 if let b = model.bubble, let a = model.slices.first(where: { $0.id == model.highlighted })?.agent {
                     SpeechBubble(agent: a, bubble: b, model: model)
@@ -1407,7 +1557,7 @@ struct SpeechBubble: View {
                     let own = i >= speech.options.count
                     answerButton(i, own ? "Type your own answer…" : speech.options[i], own: own,
                                  deny: !own && speech.options[i].lowercased().hasPrefix("no"),
-                                 hot: model.confirmed && model.hoveredOption == i, sent: model.sentOption == i)
+                                 hot: model.canAnswer && model.hoveredOption == i, state: model.buttonState(i))
                         .frame(width: r.width, height: r.height)
                         .offset(x: r.minX, y: r.minY)
                         // Faint until the question has been checked to be the one the agent is asking now.
@@ -1419,12 +1569,13 @@ struct SpeechBubble: View {
                         .offset(x: bubble.hintOnLeft ? -(300 + 14) : bubble.size.width + 14, y: r.minY - 6)
                         .transition(.opacity)
                 }
-                Text(model.sentOption != nil ? "Sent — waiting for the agent…"
-                     : !model.confirmed ? "Checking that this is still what it asks…"
+                Text(model.answerNote
+                     ?? (!model.confirmed ? "Checking that this is still what it asks…"
                      : (!bubble.expanded && agent.isLongQuestion) ? "Move onto the bubble to read the whole question"
                      : approval != nil ? "\(agent.prompt.isEmpty ? "Do you want to proceed?" : agent.prompt)  Click an answer to send it"
-                     : "Point at an answer and click to send it")
+                     : "Point at an answer and click to send it"))
                     .font(.system(size: 10.5, weight: .medium))
+                    .lineLimit(1).minimumScaleFactor(0.85)
                     .foregroundStyle(Color(white: 0.45))
                     .frame(width: bubble.size.width - 2 * RingModel.pad, height: RingModel.hintHeight, alignment: .center)
                     .offset(x: RingModel.pad, y: bubble.size.height - RingModel.pad - RingModel.hintHeight + 6)
@@ -1434,6 +1585,7 @@ struct SpeechBubble: View {
         .shadow(color: .black.opacity(0.35), radius: 12, y: 5)
         .animation(.spring(response: 0.18, dampingFraction: 0.7), value: model.hoveredOption)
         .animation(.easeOut(duration: 0.15), value: model.sentOption)
+        .animation(.easeOut(duration: 0.15), value: model.delivery)
     }
 
     /// The explanation for the choice under the pointer, like an item tooltip in a game.
@@ -1452,29 +1604,45 @@ struct SpeechBubble: View {
     }
 
     /// A chunky, game-style answer button with a key-cap number.
-    private func answerButton(_ i: Int, _ text: String, own: Bool, deny: Bool = false, hot: Bool, sent: Bool) -> some View {
+    private func answerButton(_ i: Int, _ text: String, own: Bool, deny: Bool = false, hot: Bool,
+                              state: RingModel.ButtonState) -> some View {
         let green = Color(red: 0.20, green: 0.72, blue: 0.42)
+        // The picked button says what became of the answer. On its way is the blue of an agent at
+        // work, and only an answer that herdr-core has pressed is the green of done.
+        let tint: Color?
+        switch state {
+        case .resting: tint = nil
+        case .sending: tint = Color(red: 0.35, green: 0.62, blue: 1.0)
+        case .sent: tint = green
+        case .failed: tint = Color(red: 0.86, green: 0.27, blue: 0.25)
+        }
         // Refusing looks different from agreeing, so a "No" is never picked by mistake.
         let hotColors = deny
             ? [Color(white: 0.42), Color(white: 0.26)]
             : [Color(red: 1.0, green: 0.60, blue: 0.40), Palette.accent]
-        let face: AnyShapeStyle = sent
-            ? AnyShapeStyle(LinearGradient(colors: [green.opacity(0.9), green], startPoint: .top, endPoint: .bottom))
-            : hot
+        let face: AnyShapeStyle = tint.map { AnyShapeStyle(LinearGradient(colors: [$0.opacity(0.9), $0], startPoint: .top, endPoint: .bottom)) }
+            ?? (hot
                 ? AnyShapeStyle(LinearGradient(colors: hotColors, startPoint: .top, endPoint: .bottom))
-                : AnyShapeStyle(LinearGradient(colors: [Color(white: 0.98), Color(white: 0.91)], startPoint: .top, endPoint: .bottom))
-        let lit = hot || sent
+                : AnyShapeStyle(LinearGradient(colors: [Color(white: 0.98), Color(white: 0.91)], startPoint: .top, endPoint: .bottom)))
+        let lit = hot || tint != nil
         return HStack(spacing: 10) {
             ZStack {
                 RoundedRectangle(cornerRadius: 7, style: .continuous).fill(lit ? Color.white : Color(white: 0.14))
-                if sent {
+                switch state {
+                case .sent:
                     Image(systemName: "checkmark").font(.system(size: 12, weight: .heavy)).foregroundStyle(green)
-                } else if own {
-                    Image(systemName: "pencil").font(.system(size: 13, weight: .heavy))
-                        .foregroundStyle(hot ? (deny ? Color(white: 0.2) : Palette.accent) : Color.white)
-                } else {
-                    Text("\(i + 1)").font(.system(size: 13, weight: .heavy, design: .rounded))
-                        .foregroundStyle(hot ? (deny ? Color(white: 0.2) : Palette.accent) : Color.white)
+                case .sending:
+                    Image(systemName: "paperplane.fill").font(.system(size: 12, weight: .heavy)).foregroundStyle(tint ?? .blue)
+                case .failed:
+                    Image(systemName: "exclamationmark").font(.system(size: 13, weight: .heavy)).foregroundStyle(tint ?? .red)
+                case .resting:
+                    if own {
+                        Image(systemName: "pencil").font(.system(size: 13, weight: .heavy))
+                            .foregroundStyle(hot ? (deny ? Color(white: 0.2) : Palette.accent) : Color.white)
+                    } else {
+                        Text("\(i + 1)").font(.system(size: 13, weight: .heavy, design: .rounded))
+                            .foregroundStyle(hot ? (deny ? Color(white: 0.2) : Palette.accent) : Color.white)
+                    }
                 }
             }
             .frame(width: 26, height: 26)
@@ -1484,7 +1652,7 @@ struct SpeechBubble: View {
                 .foregroundStyle(lit ? Color.white : Color(white: own ? 0.35 : 0.12))
                 .lineLimit(1).minimumScaleFactor(0.78)
             Spacer(minLength: 0)
-            if hot && !sent {
+            if hot && tint == nil {
                 Image(systemName: "arrow.right.circle.fill").font(.system(size: 17)).foregroundStyle(.white)
             }
         }
@@ -1495,7 +1663,8 @@ struct SpeechBubble: View {
             .stroke(lit ? Color.white.opacity(0.0) : Color(white: 0.10).opacity(0.22), lineWidth: 1.5))
         // A darker lip underneath gives the button some depth.
         .background(RoundedRectangle(cornerRadius: 13, style: .continuous)
-            .fill(sent ? green.opacity(0.55) : hot ? (deny ? Color(white: 0.14) : Color(red: 0.78, green: 0.26, blue: 0.20)) : Color(white: 0.72))
+            .fill(tint.map { $0.opacity(0.55) }
+                  ?? (hot ? (deny ? Color(white: 0.14) : Color(red: 0.78, green: 0.26, blue: 0.20)) : Color(white: 0.72)))
             .offset(y: hot ? 2 : 3))
         .offset(y: hot ? 1 : 0)
         .scaleEffect(hot ? 1.025 : 1)
@@ -1510,8 +1679,11 @@ final class AgentRing {
     /// The person asked to pin or unpin the agent being aimed at.
     var onPin: ((AgentInfo) -> Void)?
     private var shown: [AgentInfo] = []    // what the wheel was last given to show
-    /// The person picked one of the agent's offered answers (by index).
+    /// The person picked one of the agent's offered answers (by index). What became of the
+    /// answer comes back through `answered`.
     var onAnswer: ((AgentInfo, Int) -> Void)?
+    /// The choice (counted from 0) of an answer that is still on its way to this agent, if one is.
+    var answerOnItsWay: ((String) -> Int?)?
     /// The person wants to type their own answer; the point is where to put the text box (Cocoa screen coordinates).
     var onType: ((AgentInfo, CGPoint) -> Void)?
     /// The wheel has come up, or has been put away.
@@ -1521,9 +1693,20 @@ final class AgentRing {
     private var pointerOnBubble = false
     private var expandedFor: String?           // agent whose bubble is showing its whole question
     private var anchor: (x: CGFloat, bottom: CGFloat)?   // keeps the answer buttons still while it grows
-    private var panel: NSPanel?
+    private var panel: WheelPanel?
     private var timer: Timer?
     private var centre = CGPoint.zero      // screen coordinates, top-left origin
+    private var openedAt = Date()          // when the wheel came up, and so began taking the pointer
+    private var sentAt: Date?              // when the answer that is on its way was picked
+    private var leaveBy: Date?             // asked to close while it was: the wheel goes then at the latest
+    private var afterLeaving: (() -> Void)?
+    private let onScreen: Bool
+
+    /// `onScreen` false keeps the wheel off the screen, for tests: it is laid out, aimed and
+    /// answered from as usual, but no window comes up and the pointer is left alone.
+    init(onScreen: Bool = true) {
+        self.onScreen = onScreen
+    }
 
     var isOpen: Bool { timer != nil }
 
@@ -1531,6 +1714,33 @@ final class AgentRing {
     /// reach past the widest thing beside the biggest wheel (a bubble with a choice's explanation
     /// next to it, or a bubble showing a whole long question) or that gets cut off at its edge.
     static let canvas: CGFloat = 2200
+
+    /// How long after the wheel opens an answer can still be held back by what the pointer did
+    /// before it opened: herdr-core's 3 seconds, and a little for the asking.
+    static let quietWait: TimeInterval = 3.5
+
+    /// The wheel's window: see-through, over everything, and never the active window.
+    ///
+    /// It takes the pointer for as long as it is up, on the whole canvas and not only where
+    /// something is drawn. Left to pass through, every movement on the wheel also went to the
+    /// window underneath. An agent's pane that reports pointer movement, as Claude Code's does,
+    /// passes each one on as input, and herdr-core presses an answer's key only once the pane
+    /// has had about 3 seconds without any. So answering the agent whose pane the wheel was
+    /// opened over kept its own answer from going in for as long as the pointer moved.
+    static func makePanel(showing model: RingModel) -> WheelPanel {
+        let p = WheelPanel(contentRect: NSRect(x: 0, y: 0, width: canvas, height: canvas),
+                           styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        p.isOpaque = false
+        p.backgroundColor = .clear
+        p.hasShadow = false
+        p.level = .popUpMenu
+        // Said outright: a see-through window that is not told takes the pointer only where it is drawn on.
+        p.ignoresMouseEvents = false
+        p.isReleasedWhenClosed = false
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
+        p.contentView = NSHostingView(rootView: RingView(model: model).frame(maxWidth: .infinity, maxHeight: .infinity))
+        return p
+    }
 
     func show(_ agents: [AgentInfo], herdr: HerdrStatus, appInstalled: Bool) {
         model.herdr = herdr
@@ -1542,7 +1752,11 @@ final class AgentRing {
         expandedFor = nil
         anchor = nil
         model.hoveredOption = nil
-        model.sentOption = nil
+        showAnswer(for: nil)
+        model.leaving = false
+        leaveBy = nil
+        afterLeaving = nil
+        openedAt = Date()
         model.bubble = nil
         model.active = true
         model.forgetCentre()
@@ -1562,17 +1776,13 @@ final class AgentRing {
         let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
         centre = CGPoint(x: origin.x + side / 2, y: primaryHeight - (origin.y + side / 2))
 
-        if panel == nil {
-            let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: side, height: side),
-                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-            p.isOpaque = false
-            p.backgroundColor = .clear
-            p.hasShadow = false
-            p.level = .popUpMenu
-            p.ignoresMouseEvents = true
-            p.isReleasedWhenClosed = false
-            p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
-            p.contentView = NSHostingView(rootView: RingView(model: model).frame(maxWidth: .infinity, maxHeight: .infinity))
+        if panel == nil, onScreen {
+            let p = Self.makePanel(showing: model)
+            // Clicks are picked up by the button tap before any window sees them. One that gets
+            // this far, because the tap is not running, would otherwise be lost on the wheel.
+            p.onClick = { [weak self] right in
+                if right { self?.pinAimed() } else { self?.choose() }
+            }
             panel = p
         }
         panel?.setFrameOrigin(origin)
@@ -1609,8 +1819,9 @@ final class AgentRing {
 
     /// A right-click: pin or unpin the wedge being aimed at and stay open. Anywhere else it is an ordinary click.
     func pinAimed() {
+        if model.leaving { return }
         // On the hub a right-click puts the wheel away, the other half of a left-click opening its agent.
-        if model.onHub { close(); return }
+        if model.onHub { leave(); return }
         guard model.notice == nil, pointerOnWheel, let picked = model.slices.first(where: { $0.id == model.highlighted })?.agent else {
             choose()
             return
@@ -1618,10 +1829,92 @@ final class AgentRing {
         onPin?(picked)
     }
 
+    // MARK: Answers on their way
+
+    /// Show what is known of an answer to the agent now aimed at: none, or one that is still on
+    /// its way. That may have been picked before the wheel was aimed here, or before it opened,
+    /// and it still counts: another sent now would be pressed right after it.
+    private func showAnswer(for id: String?) {
+        let pending = id.flatMap { answerOnItsWay?($0) }
+        model.sentOption = pending
+        model.delivery = nil
+        model.held = false
+        sentAt = pending == nil ? nil : Date()
+    }
+
+    /// herdr-core has said what became of an answer that the wheel sent. Call it on the main thread.
+    func answered(_ agent: AgentInfo, option: Int, _ outcome: AgentWatcher.Delivery) {
+        // Only while that answer is still the one on show; the wheel may have been aimed elsewhere,
+        // or closed and opened again, since it was picked.
+        guard isOpen, model.highlighted == agent.id, model.sentOption == option, model.delivery == nil else { return }
+        if outcome == .refused {
+            // The answer before this one is still on its way, and is the one to show.
+            showAnswer(for: agent.id)
+            return
+        }
+        model.delivery = outcome
+        model.held = false
+        sentAt = nil
+        // A wheel that was only waiting for this goes now, once there has been time to see it.
+        if model.leaving { leaveBy = Date().addingTimeInterval(0.45) }
+    }
+
+    /// Put the wheel away because the person asked for that, then do `after` (open an agent, say).
+    ///
+    /// While an answer is on its way the wheel stays up until it has gone in. It is the wheel that
+    /// keeps the pointer from the agent's pane, and herdr-core presses the key only once that pane
+    /// has been left alone for about 3 seconds: put away at once, with the pointer then moving
+    /// over the pane, the answer would be held back for as long as it moved. The wait is short,
+    /// because the pane has been left alone since the wheel opened, and it has an end.
+    private func leave(then after: (() -> Void)? = nil) {
+        let onItsWay = model.sentOption != nil && model.delivery == nil
+        guard isOpen, let until = Self.stayUntil(opened: openedAt, picked: onItsWay ? sentAt : nil) else {
+            close()
+            after?()
+            return
+        }
+        leaveBy = until
+        afterLeaving = after
+        model.leaving = true
+        model.hoveredOption = nil
+    }
+
+    /// Until when a wheel that has been asked to close stays up for an answer that is on its way,
+    /// or nil to close at once. `picked` is when that answer was picked, nil when none is on its way.
+    ///
+    /// What can hold the answer back is what the pointer did over the pane before the wheel opened,
+    /// so it is expected within `quietWait` of the wheel opening, or at once when that is already
+    /// past. Whatever else holds it, the wheel does not wait beyond that.
+    static func stayUntil(opened: Date, picked: Date?, now: Date = Date()) -> Date? {
+        guard let picked else { return nil }
+        let until = max(opened.addingTimeInterval(quietWait), picked.addingTimeInterval(1))
+        return now < until ? until : nil
+    }
+
+    /// Put the wheel away because the person asked for that, with Escape or from outside.
+    func dismiss() {
+        if !model.leaving { leave() }
+    }
+
     private func track() {
+        // Asked to close while an answer was on its way: the wheel waits for that and nothing else,
+        // wherever the pointer goes meanwhile.
+        if model.leaving {
+            if Date() >= (leaveBy ?? .distantPast) {
+                let after = afterLeaving
+                close()
+                after?()
+            }
+            return
+        }
         guard let m = CGEvent(source: nil)?.location else { return }
         let rel = CGSize(width: m.x - centre.x, height: m.y - centre.y)
         let r = hypot(rel.width, rel.height)
+
+        // An answer that has been on its way for a while is being held back; the bubble says why.
+        let held = model.sentOption != nil && model.delivery == nil
+            && (sentAt.map { Date().timeIntervalSince($0) >= RingModel.heldAfter } ?? false)
+        if held != model.held { model.held = held }
 
         // Is the pointer over the bubble, or one of its answer buttons?
         var option: Int?
@@ -1652,7 +1945,7 @@ final class AgentRing {
         pointerOnBubble = overBubble
         pointerOnWheel = r <= model.outerRadius + 22 && model.target(for: rel) != nil
         // A notice is small, so it lets go sooner than a wheel with bubbles around it.
-        if !overBubble && r > (model.notice != nil ? 300 : model.outerRadius + 330) { close(); return }
+        if !overBubble && r > (model.notice != nil ? 300 : model.outerRadius + 330) { leave(); return }
 
         // On the hub the pointer aims at the hub's agent.
         let onHub = model.notice == nil && model.centre != nil && RingModel.isOnHub(rel)
@@ -1667,7 +1960,7 @@ final class AgentRing {
         let aim = model.aim(at: rel)
         if aim != model.highlighted {
             model.highlighted = aim
-            model.sentOption = nil
+            showAnswer(for: aim)
             expandedFor = nil
             anchor = nil
             placeBubble()
@@ -1687,7 +1980,7 @@ final class AgentRing {
         if s.agent.message != lastQuestion {
             // A new question: start again from the preview.
             lastQuestion = s.agent.message
-            model.sentOption = nil
+            showAnswer(for: s.id)
             expandedFor = nil
             anchor = nil
         }
@@ -1731,6 +2024,8 @@ final class AgentRing {
     /// that opened the wheel: on the hub that still closes it, as it always has, so the wheel can
     /// be glanced at and put away with the same button.
     func choose(fromTrigger: Bool = false) {
+        // Already on its way out, waiting only for an answer to go in.
+        if model.leaving { return }
         // A notice has nothing to pick: any click or tap just closes it.
         if model.notice != nil { close(); return }
         let picked = model.slices.first { $0.id == model.highlighted }?.agent
@@ -1750,7 +2045,11 @@ final class AgentRing {
                 onType?(picked, spot)
                 return
             }
+            // Picked, and on its way. The button turns green only when `answered` says it went in.
             model.sentOption = option
+            model.delivery = nil
+            model.held = false
+            sentAt = Date()
             onAnswer?(picked, option)
             return
         }
@@ -1771,14 +2070,17 @@ final class AgentRing {
             pointerOnBubble = false
             return
         }
-        close()
         // Only a click on a wedge or on the hub opens an agent; clicking anywhere else just dismisses the wheel.
-        if onAgent, let picked {
-            if model.onHub { Log.write("agents: opening \(picked.id) from the middle of the wheel") }
-            onChoose?(picked)
+        // Opening it brings its pane under the pointer, so that too waits for an answer on its way.
+        let fromHub = model.onHub
+        leave { [weak self] in
+            guard onAgent, let picked else { return }
+            if fromHub { Log.write("agents: opening \(picked.id) from the middle of the wheel") }
+            self?.onChoose?(picked)
         }
     }
 
+    /// Take the wheel off the screen now, whatever is on its way.
     func close() {
         let wasOpen = isOpen
         timer?.invalidate()
@@ -1786,7 +2088,24 @@ final class AgentRing {
         panel?.orderOut(nil)
         model.active = false
         model.onHub = false
+        model.leaving = false
+        leaveBy = nil
+        afterLeaving = nil
         if wasOpen { onOpenChange?(false) }
+    }
+}
+
+/// The window the wheel is drawn in. A click normally never reaches it, because the button tap
+/// picks clicks up before any window sees them; one that does is handed on to be acted on.
+final class WheelPanel: NSPanel {
+    var onClick: ((_ right: Bool) -> Void)?
+
+    override func sendEvent(_ event: NSEvent) {
+        switch event.type {
+        case .leftMouseDown: onClick?(false)
+        case .rightMouseDown: onClick?(true)
+        default: super.sendEvent(event)
+        }
     }
 }
 

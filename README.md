@@ -76,6 +76,11 @@ Click the GIF to watch **MouseHerdr: Welcome to My Herd** on YouTube
 - If it asked a question, a speech bubble shows it. Each offered choice is a button you can
   click to answer without leaving what you're doing; hovering a choice shows its
   explanation, and "Type your own answer…" opens a small text box.
+- The choice you clicked is blue while the answer is on its way and turns green once the
+  agent has it. herdr-core delivers an answer when that agent's terminal has had about
+  3 seconds without typing or pointer movement, so it can take a moment if you were just
+  busy there. The wheel keeps the pointer from the window underneath while it is up, and
+  if you close it before the answer has gone in, it stays a moment longer until it has.
 - When an agent asks to run something risky ("Do you want to proceed?"), the bubble shows
   the exact command and the agent's own choices, such as Yes, Yes and don't ask again, and
   No, so you can approve or refuse it from the mouse.

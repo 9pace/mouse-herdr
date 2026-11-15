@@ -551,7 +551,7 @@ final class AppState: ObservableObject {
         tap.onEscape = { [weak self] in
             guard let self, self.ring.isOpen else { return false }
             Log.write("agents: wheel closed with Escape")
-            self.ring.close()
+            self.ring.dismiss()
             return true
         }
         ring.onAim = { [weak self] in self?.buzz(.tick) }
@@ -564,14 +564,20 @@ final class AppState: ObservableObject {
             guard let self else { return }
             self.replyBox.show(for: agent, at: spot) { text in self.agents.answer(agent, typed: text) }
         }
+        // An answer picked earlier may still be on its way to an agent; the wheel shows that it is.
+        ring.answerOnItsWay = { [weak self] id in self?.agents.answering[id] }
         ring.onAnswer = { [weak self] agent, option in
             guard let self else { return }
-            self.agents.answer(agent, option: option)
-            self.buzz(.tick)
-            // The agent may ask its next question; refresh so it can be answered straight away.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
-                if self.ring.isOpen { self.refreshRing() }
+            self.agents.answer(agent, option: option) { outcome in
+                // Only now is it known whether the agent got it: herdr-core may hold a key back.
+                self.ring.answered(agent, option: option, outcome)
+                guard case .delivered = outcome else { return }
+                // The agent may ask its next question; refresh so it can be answered straight away.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    if self.ring.isOpen { self.refreshRing() }
+                }
             }
+            self.buzz(.tick)
         }
 
         hid.onStatus = { [weak self] s in
@@ -739,8 +745,10 @@ final class AppState: ObservableObject {
 
     /// Answer an agent's question from the window with one of its offered choices.
     func answer(_ agent: AgentInfo, option: Int) {
-        agents.answer(agent, option: option)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.refreshAgentList() }
+        agents.answer(agent, option: option) { [weak self] _ in
+            // Once herdr-core has pressed the key, which can be a few seconds after the click.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self?.refreshAgentList() }
+        }
     }
 
     /// Plain-language list of what opens the wheel on this mouse right now.

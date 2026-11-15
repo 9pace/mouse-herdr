@@ -259,7 +259,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                                     toward: CGSize(width: -dx, height: -dy), textHeight: m.textHeight, optionCount: m.options, expanded: big)
                     let hover = value("--hover")
                     model.hoveredOption = hover == "none" ? nil : (hover.flatMap { Int($0) } ?? (m.options > 1 ? 1 : nil))
-                    model.sentOption = value("--sent").flatMap { Int($0) }
+                    // "--sent N" shows an answer that has gone in; "--sending N" one still on its way
+                    // (with "--held", held back by herdr-core, or with "--leaving", in a wheel that
+                    // was asked to close meanwhile); "--failed N" one that could not be sent.
+                    if let n = value("--sent").flatMap({ Int($0) }) {
+                        model.sentOption = n
+                        model.delivery = .delivered(late: false)
+                    } else if let n = value("--sending").flatMap({ Int($0) }) {
+                        model.sentOption = n
+                        model.held = args.contains("--held")
+                        model.leaving = args.contains("--leaving")
+                    } else if let n = value("--failed").flatMap({ Int($0) }) {
+                        model.sentOption = n
+                        model.delivery = .failed
+                    }
                     // "--layout" prints where things are (points from the picture's top-left), for animating over it.
                     if args.contains("--layout"), let b = model.bubble {
                         let c = RingView.side / 2
