@@ -2,7 +2,9 @@
 """Check build failure handling and, optionally, the packaged app's Herdr and mouse diagnostics."""
 
 import os
+import base64
 from pathlib import Path
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -88,7 +90,8 @@ class HerdrSetupTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.hc = self.root / "hc"
         self.env = dict(os.environ, MOUSEHERDR_HC=str(self.hc),
-                        MOUSEHERDR_HERDR_APP=str(self.root / "missing-herdr-app"))
+                        MOUSEHERDR_HERDR_APP=str(self.root / "missing-herdr-app"),
+                        CFFIXED_USER_HOME=str(self.root))
 
     def status(self, script=None):
         if script is not None:
@@ -126,9 +129,14 @@ class HerdrSetupTests(unittest.TestCase):
 class MouseDetectionTests(unittest.TestCase):
     """How the packaged app recognises mice. None of this needs a mouse, a permission or Herdr."""
 
+    def setUp(self):
+        self.home = tempfile.TemporaryDirectory(prefix="mouseherdr-diagnostics-")
+        self.addCleanup(self.home.cleanup)
+
     def run_app(self, *args):
         return subprocess.run(
             [str(Path(BINARY).resolve()), *args], capture_output=True, text=True, timeout=20,
+            env=dict(os.environ, CFFIXED_USER_HOME=self.home.name),
         )
 
     def identify(self, *args):
@@ -215,6 +223,30 @@ class MouseDetectionTests(unittest.TestCase):
             self.assertIn("Mice connected:", lines)
             self.assertEqual(sum(line.startswith("* ") for line in lines), 1, "one mouse is followed")
             self.assertTrue(any(line.startswith("MouseHerdr would follow: ") for line in lines), result.stdout)
+
+
+@unittest.skipUnless(BINARY, "Set MOUSEHERDR_TEST_BINARY to test a packaged app")
+class UpdatePackagingTests(unittest.TestCase):
+    def test_update_defaults_signatures_and_offline_notes_are_bundled(self):
+        app = Path(BINARY).resolve().parents[2]
+        info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+        for key in ["SUEnableAutomaticChecks", "SUAutomaticallyUpdate",
+                    "SURequireSignedFeed", "SUVerifyUpdateBeforeExtraction"]:
+            self.assertIs(info[key], True)
+        self.assertIs(info["SUSendProfileInfo"], False)
+        self.assertEqual(info["SUScheduledCheckInterval"], 86400)
+        public_key = info["SUPublicEDKey"]
+        self.assertEqual(len(base64.b64decode(public_key, validate=True)), 32)
+        self.assertEqual(public_key, (ROOT / "Resources/SparklePublicKey.txt").read_text().strip())
+        self.assertTrue((app / "Contents/Resources/ReleaseNotes.md").read_text().strip())
+        self.assertTrue((app / "Contents/Resources/Sparkle-LICENSE.txt").is_file())
+        from bundle_signing import sparkle_targets
+        self.assertEqual(len(sparkle_targets(app)), 5)
+        result = subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rpaths = subprocess.check_output(["otool", "-l", str(Path(BINARY).resolve())], text=True)
+        self.assertIn("@executable_path/../Frameworks", rpaths)
 
 
 if __name__ == "__main__":

@@ -30,6 +30,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let state = AppState()
     private var window: NSWindow?
     private var statusItem: NSStatusItem?
+    private var updateMenuItem: NSMenuItem?
+    private var updateWatch: AnyCancellable?
+    private var whatsNewWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ note: Notification) {
         let args = CommandLine.arguments
@@ -359,6 +362,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setupStatusItem()
         state.openWindow = { [weak self] in self?.showWindow() }
         state.start()
+        state.updates.showWhatsNew = { [weak self] in self?.showWhatsNew() }
+        state.updates.start()
+        updateWatch = state.updates.$phase.combineLatest(state.updates.$canCheck)
+            .receive(on: DispatchQueue.main).sink { [weak self] phase, canCheck in
+                self?.updateMenuItem?.title = phase.menuTitle
+                self?.updateMenuItem?.isEnabled = phase.ready || canCheck
+            }
         // A newly found mouse is pointed out under the menu bar icon while the window is closed.
         noticeWatch = state.$mouseNotice.receive(on: DispatchQueue.main).sink { [weak self] _ in self?.showMouseNotice() }
 
@@ -366,6 +376,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // or when a permission still needs granting.
         let defaults = UserDefaults.standard
         let firstRun = !defaults.bool(forKey: "didFirstRun")
+        if args.contains("--settings") { state.tab = .settings }
+        let updated = ReleaseHistory(defaults: defaults).recordLaunch(
+            build: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
+            previouslyUsedApp: !firstRun)
         if firstRun || !state.accessibilityOK || args.contains("--show") {
             defaults.set(true, forKey: "didFirstRun")
             showWindow()
@@ -373,6 +387,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // The first quiet start: point out where the app went, once.
             defaults.set(true, forKey: "didExplainMenuBar")
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in self?.explainMenuBar() }
+        }
+        if updated {
+            DispatchQueue.main.async { [weak self] in self?.showWhatsNew() }
         }
     }
 
@@ -441,9 +458,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = NSImage(systemSymbolName: "computermouse.fill", accessibilityDescription: "MouseHerdr")
         let menu = NSMenu()
+        menu.autoenablesItems = false
         menu.addItem(withTitle: "Open MouseHerdr…", action: #selector(showWindow), keyEquivalent: "").target = self
         // The way to the wheel on a mouse with no spare button, such as a Magic Mouse.
         menu.addItem(withTitle: "Show Agent Wheel", action: #selector(showWheel), keyEquivalent: "").target = self
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",").target = self
+        let update = menu.addItem(withTitle: "Check for Updates…", action: #selector(updateApp), keyEquivalent: "")
+        update.target = self
+        update.isEnabled = false
+        updateMenuItem = update
+        menu.addItem(withTitle: "What’s New…", action: #selector(showWhatsNew), keyEquivalent: "").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit MouseHerdr", action: #selector(quit), keyEquivalent: "q").target = self
         item.menu = menu
@@ -451,6 +476,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc func quit() { NSApp.terminate(nil) }
+
+    @objc func showSettings() { state.tab = .settings; showWindow() }
+
+    @objc func updateApp() {
+        if state.updates.phase.ready { state.updates.restartToUpdate() }
+        else { state.updates.checkForUpdates() }
+    }
+
+    @objc func showWhatsNew() {
+        if whatsNewWindow == nil {
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 490),
+                             styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            w.title = "What’s New in MouseHerdr"
+            w.isReleasedWhenClosed = false
+            w.contentView = NSHostingView(rootView: WhatsNewView { [weak w] in w?.close() })
+            w.center()
+            whatsNewWindow = w
+        }
+        whatsNewWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
 
     @objc func showWheel() {
         // Once the menu has closed, so the wheel opens around a pointer that is free to aim.
@@ -500,8 +546,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         state.launchAtLogin = true
         state.available = Set(state.profile.controls.map { $0.slot })
         state.hapticsAvailable = state.profile.hasHaptics
-        // "--tab agents|buttons|feel" picks the page; snapshots show sample agents, never live ones.
+        // "--tab agents|buttons|feel|settings" picks the page; snapshots never start the updater.
         let argv = CommandLine.arguments
+        if argv.contains("--update-ready") { state.updates.poseReadyUpdate() }
         if let j = argv.firstIndex(of: "--tab"), j + 1 < argv.count, let t = AppState.Tab(rawValue: argv[j + 1]) { state.tab = t }
         if argv.contains("--wheel") || argv.contains("--gesture") || argv.contains("--profile") { state.tab = .buttons }
         // A made-up device of the profile's own kind, so the window says how it is "connected".
@@ -536,8 +583,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Only select what this mouse has.
         let wanted = CommandLine.arguments.contains("--wheel") ? .thumbWheel : slot ?? state.profile.firstSelected
         if state.profile.control(wanted) != nil { state.selected = wanted }
-        let host: NSView = NSHostingView(rootView: ContentView(state: state))
-        host.frame = NSRect(x: 0, y: 0, width: 1010, height: 690)
+        let whatsNew = argv.contains("--whats-new")
+        let host: NSView = whatsNew ? NSHostingView(rootView: WhatsNewView(close: {}))
+            : NSHostingView(rootView: ContentView(state: state))
+        host.frame = NSRect(x: 0, y: 0, width: whatsNew ? 560 : 1010, height: whatsNew ? 490 : 690)
         let w = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         w.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         w.contentView = host

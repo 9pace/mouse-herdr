@@ -67,10 +67,18 @@ jobs:
           ref: ${{ env.RELEASE_SHA }}
           persist-credentials: false
 
+      - name: Prepare release notes for the app and GitHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS_TAG: ${{ needs.plan.outputs.previous_tag }}
+        run: python3 scripts/update_feed.py notes
+
       - name: Build the app for Apple silicon and Intel
         env:
           SIGNING: adhoc
           UNIVERSAL: "1"
+          RELEASE_NOTES_FILE: dist/ReleaseNotes.md
+          RELEASE_BUILD: "1"
         run: |
           ./build.sh
           lipo -archs dist/MouseHerdr.app/Contents/MacOS/MouseHerdr
@@ -94,7 +102,7 @@ jobs:
           rm -rf verified
           mkdir verified
           ditto -x -k MouseHerdr.zip verified
-          codesign --verify --strict --all-architectures --verbose=2 verified/MouseHerdr.app
+          codesign --verify --deep --strict --all-architectures --verbose=2 verified/MouseHerdr.app
           xcrun stapler validate verified/MouseHerdr.app
           spctl --assess --type execute verified/MouseHerdr.app
           python3 - <<'PY'
@@ -113,6 +121,11 @@ jobs:
           MOUSEHERDR_TEST_BINARY: dist/verified/MouseHerdr.app/Contents/MacOS/MouseHerdr
         run: python3 scripts/test_setup.py
 
+      - name: Sign the update archive and feed
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: python3 scripts/update_feed.py sign
+
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -129,6 +142,13 @@ jobs:
             exit 0
           fi
           cat > notes.md <<EOF
+          ## Updating
+
+          MouseHerdr checks for updates daily and downloads them in the background.
+          Choose **Restart to Update** from Settings or the menu bar when ready.
+          Updates also install when you next quit MouseHerdr.
+          Automatic updates are on by default and can be turned off in Settings.
+
           ## Install
 
           1. Download **MouseHerdr.zip** from Assets below and unzip it.
@@ -149,21 +169,19 @@ jobs:
           \`shasum -a 256 -c MouseHerdr.zip.sha256\` in that directory.
 
           EOF
+          cat dist/ReleaseNotes.md >> notes.md
           if [ "$state" = draft ]; then
             # Retry an interrupted upload without overwriting a published release.
-            gh release upload "v${VERSION}" dist/MouseHerdr.zip dist/MouseHerdr.zip.sha256 \
+            gh release upload "v${VERSION}" dist/MouseHerdr.zip dist/MouseHerdr.zip.sha256 dist/appcast.xml \
               --repo "$GITHUB_REPOSITORY" --clobber
             gh release edit "v${VERSION}" --repo "$GITHUB_REPOSITORY" \
               --notes-file notes.md --draft=false --latest
           else
-            notes_args=()
-            if [ -n "$PREVIOUS_TAG" ]; then notes_args+=(--notes-start-tag "$PREVIOUS_TAG"); fi
             # gh uploads the assets to a draft before publishing it.
             gh release create "v${VERSION}" \
-              dist/MouseHerdr.zip dist/MouseHerdr.zip.sha256 \
+              dist/MouseHerdr.zip dist/MouseHerdr.zip.sha256 dist/appcast.xml \
               --repo "$GITHUB_REPOSITORY" \
               --target "$RELEASE_SHA" \
               --title "MouseHerdr ${VERSION}" \
-              --notes-file notes.md \
-              --generate-notes "${notes_args[@]}" --latest
+              --notes-file notes.md --latest
           fi

@@ -46,6 +46,12 @@ if [ -z "${VERSION:-}" ]; then
   if [ -f VERSION ]; then VERSION="$(tr -d '[:space:]' < VERSION)"; else VERSION=1.0; fi
 fi
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
+RELEASE_BUILD="${RELEASE_BUILD:-0}"
+case "$RELEASE_BUILD" in
+  0) RELEASE_PLIST=false ;;
+  1) RELEASE_PLIST=true ;;
+  *) echo "RELEASE_BUILD must be 0 or 1." >&2; exit 2 ;;
+esac
 if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]]; then
   echo "VERSION must look like 1.0 or 1.0.3." >&2
   exit 2
@@ -77,6 +83,18 @@ fi
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/MouseHerdr"
+# SwiftPM links Sparkle but does not embed it in this hand-built app bundle.
+SPARKLE=".build/artifacts/sparkle/Sparkle"
+FRAMEWORK="$SPARKLE/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+[ -d "$FRAMEWORK" ] || { echo "Missing resolved Sparkle framework." >&2; exit 1; }
+mkdir -p "$APP/Contents/Frameworks"
+ditto "$FRAMEWORK" "$APP/Contents/Frameworks/Sparkle.framework"
+cp "$SPARKLE/LICENSE" "$APP/Contents/Resources/Sparkle-LICENSE.txt"
+cp "${RELEASE_NOTES_FILE:-Resources/ReleaseNotes.md}" "$APP/Contents/Resources/ReleaseNotes.md"
+SPARKLE_KEY="$(tr -d '[:space:]' < Resources/SparklePublicKey.txt)"
+if [[ ! "$SPARKLE_KEY" =~ ^[A-Za-z0-9+/]{43}=$ ]]; then
+  echo "Invalid Sparkle public key." >&2; exit 1
+fi
 
 # Use tracked artwork so packaging works without a Metal-capable graphics device.
 ICONSET="dist/AppIcon.iconset"
@@ -104,9 +122,18 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleVersion</key><string>${BUILD_NUMBER}</string>
   <key>MouseHerdrCommit</key><string>${COMMIT}</string>
   <key>MouseHerdrBranch</key><string>${BRANCH}</string>
+  <key>MouseHerdrReleaseBuild</key><${RELEASE_PLIST}/>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
+  <key>SUFeedURL</key><string>https://github.com/royosherove/mouse-herdr/releases/latest/download/appcast.xml</string>
+  <key>SUPublicEDKey</key><string>${SPARKLE_KEY}</string>
+  <key>SUEnableAutomaticChecks</key><true/>
+  <key>SUAutomaticallyUpdate</key><true/>
+  <key>SUScheduledCheckInterval</key><integer>86400</integer>
+  <key>SUSendProfileInfo</key><false/>
+  <key>SUVerifyUpdateBeforeExtraction</key><true/>
+  <key>SURequireSignedFeed</key><true/>
 </dict>
 </plist>
 EOF
@@ -114,6 +141,7 @@ EOF
 plutil -lint "$APP/Contents/Info.plist"
 
 if [ "$SIGNING" = adhoc ]; then
+  python3 scripts/bundle_signing.py "$APP" --sign -
   codesign --force --sign - --identifier "$BUNDLE_ID" "$APP"
 else
   # Keep a stable local identity so macOS keeps permissions across rebuilds.
@@ -161,9 +189,10 @@ else
     echo "No signing certificate found in $KC. See README.md for signing troubleshooting." >&2
     exit 1
   fi
+  python3 scripts/bundle_signing.py "$APP" --keychain "$KC" --sign "$CERT"
   codesign --force --keychain "$KC" --sign "$CERT" --identifier "$BUNDLE_ID" "$APP"
 fi
-codesign --verify --strict --verbose=2 "$APP"
+codesign --verify --deep --strict --verbose=2 "$APP"
 echo "built $APP"
 
 if [ "${1:-}" = "install" ]; then

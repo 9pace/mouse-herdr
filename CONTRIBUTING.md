@@ -11,6 +11,8 @@ Use macOS and Swift 5.9 or newer. From the repository:
 ```bash
 swift test
 python3 scripts/test_release.py
+python3 scripts/test_sign_release.py
+python3 scripts/test_update_feed.py
 SIGNING=adhoc ./build.sh
 MOUSEHERDR_TEST_BINARY=dist/MouseHerdr.app/Contents/MacOS/MouseHerdr python3 scripts/test_setup.py
 ```
@@ -39,7 +41,7 @@ commits, so a documentation commit after a code change does not hide that change
 
 The workflow builds one universal app, verifies both architectures and the extracted
 ZIP's signature, runs the setup checks against the extracted app, then publishes
-`MouseHerdr.zip` and its SHA-256 checksum. The asset filename stays constant so the
+`MouseHerdr.zip`, its SHA-256 checksum, and the signed Sparkle `appcast.xml`. The asset filename stays constant so the
 README's latest-download link keeps working.
 
 The version is the contents of `VERSION` followed by the total commit count on `main`
@@ -55,10 +57,16 @@ To reproduce a release build locally:
 UNIVERSAL=1 SIGNING=adhoc VERSION=1.0.0 BUILD_NUMBER=1 ./build.sh
 ```
 
-Release builds are ad-hoc signed and not notarized. Downloads can require **Open Anyway**
-and granting macOS privacy permissions again after updates. Developer ID distribution
-would also need a signing certificate and Apple notarization credentials; no such secrets
-are required by the current workflow.
+That local test build is ad-hoc signed and has automatic updates disabled. Published
+releases are Developer ID signed and notarized; see [release signing](docs/release-signing.md)
+for the credentials, nested Sparkle signing, and update feed. Keep the public bundle
+identifier, Apple team and Sparkle key stable. PR tests require no release credentials.
+
+Update tests cover persistent opt-out, explicit restart, once-per-upgrade notes, nested
+signing order, and archive/feed signature rejection using temporary test keys. Packaged
+tests also check the embedded framework and offline notes. To inspect the new screens
+without starting mouse capture or the updater, use `--snapshot` with `--tab settings
+--update-ready`, or with `--whats-new`, and a temporary `CFFIXED_USER_HOME`.
 
 ## Verify changes with a mouse
 

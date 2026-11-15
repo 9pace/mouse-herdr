@@ -14,6 +14,8 @@ import sys
 import tempfile
 from urllib.request import urlopen
 
+from bundle_signing import sparkle_targets
+
 
 SECRET_NAMES = (
     "MACOS_CERTIFICATE_P12",
@@ -57,6 +59,7 @@ class ReleaseSigner:
         app = Path(app).resolve(strict=True)
         if not (app / "Contents/MacOS/MouseHerdr").is_file():
             raise ValueError("Expected a built MouseHerdr.app bundle.")
+        nested_code = sparkle_targets(app)
         original_keychains = shlex.split(self.run("security", "list-keychains", "-d", "user"))
         with tempfile.TemporaryDirectory(prefix="mouseherdr-release-",
                                          dir=os.environ.get("RUNNER_TEMP")) as directory:
@@ -95,9 +98,13 @@ class ReleaseSigner:
                 self.redactions.extend([fingerprint, identity_name])
                 if not identity_name.endswith(f" ({self.credentials['APPLE_TEAM_ID']})"):
                     raise RuntimeError("The signing certificate does not match APPLE_TEAM_ID.")
+                for target in nested_code:
+                    self.run("codesign", "--force", "--options", "runtime", "--timestamp",
+                             "--preserve-metadata=identifier,entitlements",
+                             "--keychain", keychain, "--sign", fingerprint, str(target))
                 self.run("codesign", "--force", "--options", "runtime", "--timestamp",
                          "--keychain", keychain, "--sign", fingerprint, str(app))
-                self.run("codesign", "--verify", "--strict", "--all-architectures", str(app))
+                self.run("codesign", "--verify", "--deep", "--strict", "--all-architectures", str(app))
 
                 profile = "MouseHerdr-release"
                 self.run("xcrun", "notarytool", "store-credentials", profile,

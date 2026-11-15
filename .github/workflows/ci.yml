@@ -32,6 +32,7 @@ jobs:
         run: |
           python3 scripts/test_release.py
           python3 scripts/test_sign_release.py
+          python3 scripts/test_update_feed.py
       - name: Build and verify the app bundle
         env:
           SIGNING: adhoc
