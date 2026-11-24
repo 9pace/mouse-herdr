@@ -336,19 +336,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // glass real. The picture has in it whatever is on the display behind the wheel, and
             // taking it needs Screen Recording for the terminal. With "--reply" it is of the box for
             // typing an answer to the first agent, which only a window can draw.
+            // The wheel is light or dark as the Mac is set; "--dark" and "--light" pick one for the picture.
+            let dark = args.contains("--dark") ? true : args.contains("--light") ? false : nil
             if args.contains("--on-screen") {
                 model.glass = true
                 let panel = AgentRing.makePanel(showing: model)
+                if let dark { panel.appearance = NSAppearance(named: dark ? .darkAqua : .aqua) }
                 let reply = args.contains("--reply") ? list.first : nil
                 if let agent = reply {
                     panel.contentView = NSHostingView(rootView: ReplyBox.picture(for: agent).frame(maxWidth: .infinity, maxHeight: .infinity))
                 }
-                photograph(panel, side: reply == nil ? RingView.side : 620, to: ringShot ?? "")
+                // "--then-highlight N" moves the aim to another wedge once the wheel is up, for what
+                // only shows after a change: a wedge that grew, and the one that shrank back.
+                var wait = 0.8
+                if let j = args.firstIndex(of: "--then-highlight"), j + 1 < args.count,
+                   let next = model.slices.dropFirst(Int(args[j + 1]) ?? 0).first {
+                    wait = 1.6
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                        model.highlighted = next.id
+                        model.bubble = nil
+                    }
+                }
+                photograph(panel, side: reply == nil ? RingView.side : 620, after: wait, to: ringShot ?? "")
                 return
             }
             // "--clear" leaves the background transparent, for laying the wheel over other artwork.
             let backdrop = args.contains("--clear") ? Color.clear : Color(white: 0.55)
             let view = ZStack { backdrop; RingView(model: model) }.frame(width: RingView.side, height: RingView.side)
+                .environment(\.colorScheme, dark == true ? .dark : .light)
             let r = ImageRenderer(content: view)
             r.scale = 1.5
             if let cg = r.cgImage {
@@ -610,7 +625,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// Developer aid: show a window in the middle of the main display, without letting it take the
     /// pointer, take a screenshot of the square of that side around its middle, and quit.
-    private func photograph(_ panel: NSPanel, side: CGFloat, to path: String) {
+    private func photograph(_ panel: NSPanel, side: CGFloat, after wait: TimeInterval = 0.8, to path: String) {
         guard let screen = NSScreen.screens.first else {
             print("no display to show it on")
             exit(1)
@@ -620,7 +635,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.setFrameOrigin(NSPoint(x: screen.frame.midX - size.width / 2, y: screen.frame.midY - size.height / 2))
         panel.orderFrontRegardless()
         // Long enough for the window to be drawn and its glass to have something to show.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait) {
             // screencapture measures from the top-left corner of the main display.
             let width = min(side, screen.frame.width), height = min(side, screen.frame.height)
             let shot = Process()
