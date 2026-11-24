@@ -16,6 +16,7 @@ struct AgentInfo: Identifiable, Equatable {
     var screenOptions: [String] = [] // the numbered choices read off its dialog, in order
     var prompt = ""                  // the dialog's own question line, e.g. "Do you want to proceed?"
     var lastActive: Date?            // when it last changed what it is doing; nil until that is known
+    var folder = ""                  // the folder it was started in
     var helpers = 0                  // how many terminals it started with `hc run` are busy right now
     var inner = 0                    // how many sub-agents it is running inside itself are busy right now
 
@@ -115,16 +116,21 @@ struct AgentInfo: Identifiable, Equatable {
         return 1 - log(quiet / Self.freshFor) / log(Self.greyAfter / Self.freshFor)
     }
 
-    /// How big its wedge is: 1 is the size of a busy agent's, 0 the smallest. An agent that has
-    /// just gone quiet starts at full size and gives it up slowly, over days rather than minutes.
+    /// How big its wedge is: 1 is the size of a busy agent's, 0 the smallest. One that has
+    /// finished and not been looked at starts at full size and gives it up slowly, over days. One
+    /// that is idle is small at once, so the agents with something going on stand out.
     func size(now: Date = Date()) -> Double {
         if needsYou || status == "working" { return 1 }
-        guard let lastActive else { return 1 }
+        let most = status == "done" ? 1 : Self.idleSize
+        guard let lastActive else { return most }
         let quiet = now.timeIntervalSince(lastActive)
-        if quiet <= 0 { return 1 }
+        if quiet <= 0 { return most }
         if quiet >= Self.smallAfter { return 0 }
-        return 1 - pow(quiet / Self.smallAfter, 0.7)
+        return min(most, 1 - pow(quiet / Self.smallAfter, 0.7))
     }
+
+    /// The most an idle agent's wedge is given, on the same scale.
+    static let idleSize = 0.25
 
     /// How long ago it last did something, in a few characters. Nil while it is busy or waiting
     /// on you (that is happening now) and before the time is known.
@@ -351,9 +357,10 @@ final class AgentWatcher {
             // Plain shells aren't agents unless they report a status.
             if status.isEmpty && (agent.isEmpty || shells.contains(agent)) { continue }
             let place = (t["where"] as? String ?? "").components(separatedBy: " / ")
-            found.append((AgentInfo(id: id, agent: agent, status: status,
-                                    space: place.first ?? agent, tab: place.count > 1 ? place[1] : ""),
-                          t["parent"] as? String))
+            var info = AgentInfo(id: id, agent: agent, status: status,
+                                 space: place.first ?? agent, tab: place.count > 1 ? place[1] : "")
+            info.folder = t["cwd"] as? String ?? ""
+            found.append((info, t["parent"] as? String))
         }
         // A sub-agent is a terminal an agent started with `hc run`; herdr-core names the starter as
         // its parent. It belongs to that agent, so it is counted there while it is busy and gets
@@ -755,6 +762,8 @@ final class RingModel: ObservableObject {
         /// The wedge on that side is another session of the same space.
         var joinsPrevious = false
         var joinsNext = false
+        /// One or two words that tell this agent from the others; never cut short.
+        var name = ""
         var id: String { agent.id }
         var mid: Double { (start + end) / 2 }
         var inFamily: Bool { joinsPrevious || joinsNext }
@@ -965,6 +974,7 @@ final class RingModel: ObservableObject {
         // Only the by-space order puts a space's sessions together, so only there are they joined up.
         let grouped = order == .space
         let sessions = Dictionary(all.map { ($0.space, 1) }, uniquingKeysWith: +)
+        let names = AgentNames.names(for: all)
         let weights = zip(all, size).map { a, f in a.needsYou ? 1.45 : Self.quietWidth + (1 - Self.quietWidth) * f }
         let unit = min(2 * Double.pi / weights.reduce(0, +), 2 * Double.pi / 3.2)
         let spans = weights.map { $0 * unit }
@@ -977,11 +987,12 @@ final class RingModel: ObservableObject {
         for (i, a) in all.enumerated() {
             let span = spans[i]
             var s = Slice(agent: a, start: angle, end: angle + span, inner: a.needsYou ? 60 : 96,
-                          outer: a.needsYou ? outerRadius + 16 : outerRadius - (outerRadius - 96) / 2 * CGFloat(1 - size[i]))
+                          outer: a.needsYou ? outerRadius + 16 : outerRadius - (outerRadius - 96) * Self.quietDip * CGFloat(1 - size[i]))
             s.fresh = fresh[i]
             s.ago = a.ago(now: now)
             s.busyFor = a.busyFor(now: now)
             s.pinned = pinned.contains(a.id)
+            s.name = names[a.id] ?? a.space
             // Pointed at, a wedge is as big as a busy one, and on a crowded wheel wide enough to read.
             s.widen = max(0, max(a.needsYou ? span : unit, readable) - span) / 2
             if !a.needsYou { s.raise = outerRadius - s.outer }
@@ -1010,6 +1021,9 @@ final class RingModel: ObservableObject {
         if let h = highlighted, !result.contains(where: { $0.id == h }) { highlighted = nil }
     }
 
+    /// How much shorter the wedge that has been quiet the longest is than a busy one. A thin
+    /// wedge's name runs along it, so it keeps most of its length to have room for the name.
+    static let quietDip: CGFloat = 0.2
     /// The width of a wedge that has been quiet the longest, as a share of a busy one's.
     static let quietWidth = 0.45
     /// How wide a wedge is, where its label goes, once it is pointed at: room for a name.
@@ -1151,18 +1165,16 @@ struct ArcText: View {
         return base.fontDescriptor.withDesign(.rounded).flatMap { NSFont(descriptor: $0, size: size) } ?? base
     }()
 
-    /// Each letter and how far along the edge its middle is from the middle of the text,
-    /// cut short with "…" when the whole name doesn't fit.
+    /// Each letter and how far along the edge its middle is from the middle of the text.
     static func letters(_ text: String, room: CGFloat) -> [(letter: String, at: CGFloat)] {
         func width(_ s: String) -> CGFloat { ceil((s as NSString).size(withAttributes: [.font: font]).width * 10) / 10 }
-        var chars = text.map { String($0) }
+        // A name too long for its room loses words from the end, down to its first.
+        var words = text.split(separator: " ").map(String.init)
+        while words.count > 1, width(words.joined(separator: " ")) > room { words.removeLast() }
+        var chars = (words.isEmpty ? text : words.joined(separator: " ")).map { String($0) }
         var widths = chars.map(width)
-        if widths.reduce(0, +) > room {
-            let dots = width("…")
-            while !chars.isEmpty, widths.reduce(0, +) + dots > room { chars.removeLast(); widths.removeLast() }
-            chars.append("…")
-            widths.append(dots)
-        }
+        // One word that is still too long is cut, which is rare: a band spans two wedges or more.
+        while chars.count > 1, widths.reduce(0, +) > room { chars.removeLast(); widths.removeLast() }
         var x = -widths.reduce(0, +) / 2
         var out: [(letter: String, at: CGFloat)] = []
         for (c, w) in zip(chars, widths) {
@@ -1302,7 +1314,7 @@ struct RingView: View {
                     .rotationEffect(.radians(cos(s.mid) < 0 ? s.mid + .pi : s.mid))
                     .offset(x: CGFloat(cos(s.mid)) * middle, y: CGFloat(sin(s.mid)) * middle)
             } else {
-                label(s, on: on, t: t, width: max(arcWidth < 90 ? 44 : 64, min(150, arcWidth - 26)), tint: tint, fresh: fresh,
+                label(s, on: on, t: t, width: max(arcWidth < 90 ? 52 : 64, min(150, arcWidth - 14)), tint: tint, fresh: fresh,
                       brief: arcWidth < 90)
                     .offset(x: CGFloat(cos(s.mid)) * radius, y: CGFloat(sin(s.mid)) * radius)
             }
@@ -1338,15 +1350,7 @@ struct RingView: View {
                         helpersPill(a.subAgents, urgent: urgent).fixedSize().offset(x: urgent ? 31 : 28, y: -9)
                     }
                 }
-            if family {
-                Text(a.sessionName)
-                    .font(.system(size: urgent ? 13.5 : 12.5, weight: .bold, design: .rounded))
-                    .lineLimit(brief ? 1 : 2).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
-            } else {
-                Text(a.space)
-                    .font(.system(size: urgent ? 15.5 : 14, weight: .bold, design: .rounded))
-                    .lineLimit(1).truncationMode(.middle)
-            }
+            name(s.name).font(.system(size: family ? (urgent ? 13.5 : 12.5) : (urgent ? 15.5 : 14), weight: .bold, design: .rounded))
             if s.sibling, !brief, !a.title.isEmpty {
                 Text(a.title).font(.system(size: 11, weight: .semibold, design: .rounded)).lineLimit(1).opacity(0.92)
             }
@@ -1365,6 +1369,21 @@ struct RingView: View {
         .scaleEffect(on ? 1.08 : 0.86 + 0.14 * CGFloat(fresh))
     }
 
+    /// An agent's name, whole: on one line, or a word to a line, or as its two letters where
+    /// even a word does not fit. Never with part of it left out.
+    private func name(_ text: String) -> some View {
+        let words = text.split(separator: " ").map(String.init)
+        let small = Font.system(size: 11, weight: .bold, design: .rounded)
+        return ViewThatFits(in: .horizontal) {
+            Text(text).fixedSize()
+            if words.count > 1 { VStack(spacing: 0) { ForEach(words, id: \.self) { Text($0).fixedSize() } } }
+            Text(text).font(small).fixedSize()
+            if words.count > 1 { VStack(spacing: 0) { ForEach(words, id: \.self) { Text($0).fixedSize() } }.font(small) }
+            if words.count > 1, words[0].count > 2 { Text(words[0]).font(small).fixedSize() }
+            Text(AgentNames.monogram(text)).fixedSize()
+        }
+    }
+
     /// The label of a wedge too thin to write across: its picture, name and time in one line.
     private func spoke(_ s: RingModel.Slice, t: Double, length: CGFloat, tint: Color, fresh: Double) -> some View {
         let a = s.agent
@@ -1372,11 +1391,17 @@ struct RingView: View {
             icon(a, t: t)
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(a.needsYou ? Color.white : tint)
-            Text(s.inFamily ? a.sessionName : a.space)
-                .font(.system(size: 12, weight: .bold, design: .rounded)).lineLimit(1)
-            if let since = s.ago ?? s.busyFor {
-                Text(since).font(.system(size: 10.5, weight: .medium)).opacity(0.75).fixedSize().layoutPriority(1)
+            // The whole name with the time, the name alone, or its two letters: whichever fits.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 4) {
+                    Text(s.name).fixedSize()
+                    if let since = s.ago ?? s.busyFor { Text(since).font(.system(size: 10.5, weight: .medium)).opacity(0.75).fixedSize() }
+                }
+                Text(s.name).fixedSize()
+                Text(s.name).font(.system(size: 10.5, weight: .bold, design: .rounded)).fixedSize()
+                Text(AgentNames.monogram(s.name)).fixedSize()
             }
+            .font(.system(size: 12, weight: .bold, design: .rounded))
         }
         .foregroundStyle(.white)
         .frame(width: max(40, length))
@@ -1538,7 +1563,7 @@ struct SpeechBubble: View {
                 }
                 Text("\(agent.space.uppercased())  ·  \(heading.uppercased())" + (ago.map { "  ·  \($0.uppercased())" } ?? ""))
                     .font(.system(size: 10, weight: .heavy)).kerning(0.5)
-                    .foregroundStyle(agent.needsYou ? Palette.accent : Color(white: 0.4)).lineLimit(1)
+                    .foregroundStyle(agent.needsYou ? Palette.accent : Color(white: 0.4)).lineLimit(1).minimumScaleFactor(0.6)
             }
             .frame(width: bubble.size.width - 2 * RingModel.pad, height: RingModel.headerHeight, alignment: .leading)
             .offset(x: RingModel.pad, y: RingModel.pad)

@@ -279,9 +279,9 @@ final class AgentTests: XCTestCase {
         XCTAssertEqual(Set(rims).count, 5)
         // Busy agents are all one width, however long they have been at it.
         XCTAssertEqual(try slice("busy2").end - slice("busy2").start, widths[0], accuracy: 1e-9)
-        // The longest quiet is half as tall as a busy one, and no less.
+        // The longest quiet is a fifth shorter than a busy one, and no less: its name runs along it.
         let month = try slice("month"), busy = try slice("busy")
-        XCTAssertEqual(month.outer - month.inner, (busy.outer - busy.inner) / 2, accuracy: 1e-9)
+        XCTAssertEqual(month.outer - month.inner, (busy.outer - busy.inner) * (1 - RingModel.quietDip), accuracy: 1e-9)
         XCTAssertEqual(widths[4] / widths[0], RingModel.quietWidth, accuracy: 1e-9)
         // Colour is gone long before the size stops changing.
         XCTAssertEqual(try slice("day").fresh, 0)
@@ -447,8 +447,12 @@ final class AgentTests: XCTestCase {
         let whole = ArcText.letters("mouse", room: 400)
         XCTAssertEqual(whole.map(\.letter).joined(), "mouse")
         XCTAssertEqual(whole.first!.at, -whole.last!.at, accuracy: 3)   // centred on the middle
+        // A name too long for its room loses whole words from the end, and is never dotted.
+        let fewer = ArcText.letters("checkout flow for the mobile app", room: 90)
+        XCTAssertEqual(fewer.map(\.letter).joined(), "checkout flow")
+        XCTAssertEqual(ArcText.letters("checkout flow", room: 10).map(\.letter).joined().first, "c")
         let cut = ArcText.letters("a-very-long-space-name-indeed", room: 60)
-        XCTAssertEqual(cut.last?.letter, "…")
+        XCTAssertFalse(cut.contains { $0.letter == "…" })
         XCTAssertLessThan(cut.count, 29)
         XCTAssertLessThanOrEqual(cut.last!.at - cut.first!.at, 60)
     }
