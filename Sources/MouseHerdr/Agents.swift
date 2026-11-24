@@ -1497,7 +1497,7 @@ struct RingView: View {
         let lampInset = Double(13 / outer)
         return ZStack {
             // An agent that has finished and not been looked at glows, as one that is asking does.
-            GlassShape(shape: shape, live: model.glass, wash: wash, lit: on, shade: urgent ? 0 : 0.22,
+            GlassShape(shape: shape, live: model.glass, wash: wash, lit: on, shade: urgent ? 0 : 0.14,
                        glow: urgent ? Palette.accent : (unread ? a.color : .black),
                        glowStrength: urgent ? 0.40 + 0.35 * pulse : (unread ? 0.70 : (on ? 0.50 : 0.30)),
                        spread: urgent || unread ? 15 : 9, drop: urgent || unread ? 0 : (on ? 5 : 2))
@@ -1632,7 +1632,7 @@ struct RingView: View {
         let trim = Double(13 / radius)   // room for the strip's round ends
         return ZStack {
             GlassShape(shape: ArcStrip(start: b.start + trim, end: b.end - trim, radius: radius, width: 18),
-                       live: model.glass, shade: 0.22, glowStrength: 0.30, spread: 6, drop: 2)
+                       live: model.glass, shade: 0.14, glowStrength: 0.30, spread: 6, drop: 2)
             ArcText(text: b.name, mid: (b.start + b.end) / 2, radius: radius,
                     room: CGFloat(b.end - b.start - 2 * trim) * radius)
                 .foregroundStyle(Color.white.opacity(0.88))
@@ -1705,7 +1705,7 @@ struct RingView: View {
         .foregroundStyle(.white)
         .frame(width: RingModel.hubRadius * 2, height: RingModel.hubRadius * 2)
         // With the pointer on it, the hub is a button for the agent it names.
-        .background(WheelGlass(outline: { Path(ellipseIn: $0) }, live: model.glass, lit: model.onHub,
+        .background(WheelGlass(outline: { Path(ellipseIn: $0) }, live: model.glass, lit: model.onHub, shade: 0.14,
                                glow: model.onHub ? Palette.accent : .black, glowStrength: model.onHub ? 0.60 : 0.45,
                                drop: model.onHub ? 0 : 4))
         .overlay(Circle().stroke(Palette.accent.opacity(model.onHub ? 0.9 : 0), lineWidth: 1.5))
@@ -1778,9 +1778,10 @@ struct WheelGlass: View {
         }
     }
 
-    /// Laid over the blur, so that white words read whatever is behind. This and the two numbers
-    /// below are the ones to change for glass that is clearer or more solid.
-    static let tint = Color.black.opacity(0.14)
+    /// Laid over the blur, so that white words read whatever is behind: over a white window the
+    /// blur alone comes out a middle grey. This and the two numbers below are the ones to change
+    /// for glass that is clearer or more solid.
+    static let tint = Color.black.opacity(0.32)
     /// The glass where nothing can be blurred.
     static let standIn = Color(white: 0.07).opacity(0.76)
     /// Laid over a pane that the pointer is on.
@@ -1897,26 +1898,41 @@ struct SpeechBubble: View {
     let agent: AgentInfo
     let bubble: RingModel.Bubble
 
-    /// A small arrow on the side of the panel that faces the wedge, like a popover's.
+    /// A small arrow on the side of the panel that faces the wedge, like a popover's. It points
+    /// straight out of that side, from the spot nearest the wedge that is clear of the corners.
     private struct Arrow: Shape {
         let toward: CGSize
-        /// How far it reaches past the panel's edge.
+        var corner: CGFloat
+        /// How far it reaches past the panel's edge, and half its width there.
         static let reach: CGFloat = 12
+        static let half: CGFloat = 11
 
         func path(in rect: CGRect) -> Path {
             let c = CGPoint(x: rect.midX, y: rect.midY)
             let tx = toward.width, ty = toward.height
             guard abs(tx) > 0.001 || abs(ty) > 0.001 else { return Path() }
-            // Distance from the centre to the panel's edge in that direction.
-            let edge = min(abs(tx) > 0.001 ? rect.width / 2 / abs(tx) : .infinity,
-                           abs(ty) > 0.001 ? rect.height / 2 / abs(ty) : .infinity)
-            let tip = CGPoint(x: c.x + tx * (edge + Self.reach), y: c.y + ty * (edge + Self.reach))
-            let base = CGPoint(x: c.x + tx * (edge - 14), y: c.y + ty * (edge - 14))
-            let px = -ty * 22, py = tx * 22   // 20 wide where it leaves the panel
+            // How far from the centre the line towards the wedge leaves the panel, by each pair of sides.
+            let across = abs(tx) > 0.001 ? rect.width / 2 / abs(tx) : CGFloat.infinity
+            let along = abs(ty) > 0.001 ? rect.height / 2 / abs(ty) : CGFloat.infinity
+            let clear = corner + Self.half + 2
+            let foot: CGPoint, out: CGSize
+            if along <= across {
+                // Through the top or the bottom.
+                foot = CGPoint(x: min(max(c.x + tx * along, rect.minX + clear), rect.maxX - clear), y: ty < 0 ? rect.minY : rect.maxY)
+                out = CGSize(width: 0, height: ty < 0 ? -1 : 1)
+            } else {
+                foot = CGPoint(x: tx < 0 ? rect.minX : rect.maxX, y: min(max(c.y + ty * across, rect.minY + clear), rect.maxY - clear))
+                out = CGSize(width: tx < 0 ? -1 : 1, height: 0)
+            }
+            // It starts a little inside the panel, so that the two join without a gap.
+            let side = CGSize(width: -out.height * Self.half, height: out.width * Self.half)
+            let one = CGPoint(x: foot.x + side.width - out.width * 2, y: foot.y + side.height - out.height * 2)
+            let other = CGPoint(x: foot.x - side.width - out.width * 2, y: foot.y - side.height - out.height * 2)
+            let tip = CGPoint(x: foot.x + out.width * Self.reach, y: foot.y + out.height * Self.reach)
             var p = Path()
-            p.move(to: CGPoint(x: base.x + px, y: base.y + py))
-            p.addArc(tangent1End: tip, tangent2End: CGPoint(x: base.x - px, y: base.y - py), radius: 3)
-            p.addLine(to: CGPoint(x: base.x - px, y: base.y - py))
+            p.move(to: one)
+            p.addArc(tangent1End: tip, tangent2End: other, radius: 3)
+            p.addLine(to: other)
             p.closeSubpath()
             return p
         }
@@ -1926,8 +1942,9 @@ struct SpeechBubble: View {
 
     /// The panel and its arrow as one outline, so that glass has no seam where they meet.
     static func outline(_ rect: CGRect, toward: CGSize) -> Path {
-        let box = Path(roundedRect: rect, cornerRadius: 22, style: .continuous)
-        let arrow = Arrow(toward: toward).path(in: rect)
+        let corner: CGFloat = 22
+        let box = Path(roundedRect: rect, cornerRadius: corner, style: .continuous)
+        let arrow = Arrow(toward: toward, corner: corner).path(in: rect)
         return arrow.isEmpty ? box : Path(box.cgPath.union(arrow.cgPath))
     }
 
