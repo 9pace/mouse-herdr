@@ -1069,10 +1069,9 @@ final class RingModel: ObservableObject {
         let speech = a.speech(full: expanded)
         let body = speech.text.isEmpty ? a.title : speech.text
         // Measure the text the same way it will be drawn.
-        let base = NSFont.systemFont(ofSize: 14, weight: .medium)
         let font = a.permission != nil
-            ? NSFont.monospacedSystemFont(ofSize: 13, weight: .medium)   // a command is shown as typed
-            : base.fontDescriptor.withDesign(.rounded).flatMap { NSFont(descriptor: $0, size: 14) } ?? base
+            ? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)   // a command is shown as typed
+            : NSFont.systemFont(ofSize: 14)
         let para = NSMutableParagraphStyle()
         para.lineSpacing = 2
         let box = (body as NSString).boundingRect(
@@ -1326,10 +1325,7 @@ struct ArcText: View {
     let room: CGFloat     // how much of the circle's edge it may take up
 
     static let size: CGFloat = 11
-    private static let font: NSFont = {
-        let base = NSFont.systemFont(ofSize: size, weight: .bold)
-        return base.fontDescriptor.withDesign(.rounded).flatMap { NSFont(descriptor: $0, size: size) } ?? base
-    }()
+    private static let font = NSFont.systemFont(ofSize: size, weight: .semibold)
 
     /// Each letter and how far along the edge its middle is from the middle of the text.
     static func letters(_ text: String, room: CGFloat) -> [(letter: String, at: CGFloat)] {
@@ -1358,7 +1354,7 @@ struct ArcText: View {
             ForEach(Array(letters.enumerated()), id: \.offset) { _, l in
                 let angle = mid + (flipped ? -1 : 1) * Double(l.at / radius)
                 Text(l.letter)
-                    .font(.system(size: Self.size, weight: .bold, design: .rounded))
+                    .font(.system(size: Self.size, weight: .semibold))
                     .fixedSize()
                     .rotationEffect(.radians(angle + (flipped ? -Double.pi / 2 : Double.pi / 2)))
                     .offset(x: CGFloat(cos(angle)) * radius, y: CGFloat(sin(angle)) * radius)
@@ -1375,8 +1371,9 @@ struct RingView: View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !model.active)) { timeline in
             let t = timeline.date.timeIntervalSinceReferenceDate
             ZStack {
+                // A light shade sets the wheel off from the desktop. The glass carries the rest.
                 Circle()
-                    .fill(RadialGradient(colors: [Color.black.opacity(0.50), Color.black.opacity(0.30), .clear],
+                    .fill(RadialGradient(colors: [Color.black.opacity(0.30), Color.black.opacity(0.18), .clear],
                                          center: .center, startRadius: 40, endRadius: model.outerRadius + 90))
                 if let notice = model.notice {
                     noticeCard(notice)
@@ -1386,13 +1383,13 @@ struct RingView: View {
                     let fade = model.leaving ? 0.3 : 1.0
                     ForEach(model.slices) { s in
                         slice(s, on: model.highlighted == s.id, t: t)
-                            .opacity(fade)
+                            .faded(fade)
                             .zIndex(model.highlighted == s.id ? 1 : 0)   // grown, it lies over its neighbours' edges
                     }
                     ForEach(model.bands) { b in
-                        band(b).opacity(fade).zIndex(2)
+                        band(b).faded(fade).zIndex(2)
                     }
-                    hub.opacity(fade).zIndex(3)
+                    hub.faded(fade).zIndex(3)
                 }
                 if model.bubble == nil, let c = model.caption {
                     caption(c)
@@ -1421,23 +1418,22 @@ struct RingView: View {
         VStack(spacing: 3) {
             if !c.place.isEmpty {
                 Text(c.place)
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .font(.system(size: 13.5, weight: .semibold))
                     .lineLimit(1).truncationMode(.middle)
             }
             if !c.detail.isEmpty {
                 Text(c.detail)
-                    .font(.system(size: 12.5, weight: .medium, design: .rounded))
-                    .lineLimit(2).multilineTextAlignment(.center).opacity(0.84)
+                    .font(.system(size: 12.5))
+                    .lineLimit(2).multilineTextAlignment(.center).opacity(0.78)
             }
         }
         .foregroundStyle(.white)
-        .shadow(color: .black.opacity(0.85), radius: 3, y: 1)
         .frame(maxWidth: max(420, model.outerRadius * 2 - 20))
         .fixedSize(horizontal: true, vertical: true)
-        .padding(.horizontal, 60).padding(.vertical, 18)
-        // The wheel's own shade, carried on under the words so that they read on any desktop.
-        .background(Ellipse().fill(EllipticalGradient(colors: [Color.black.opacity(0.36), Color.black.opacity(0.20), .clear],
-                                                      center: .center, startRadiusFraction: 0.05, endRadiusFraction: 0.5)))
+        .padding(.horizontal, 18).padding(.vertical, 10)
+        // A small pane of the wheel's glass under the words, so that they read on any desktop.
+        .background(WheelGlass(outline: { Path(roundedRect: $0, cornerRadius: 16, style: .continuous) },
+                               live: model.glass, glowStrength: 0.40))
     }
 
     // MARK: Notice
@@ -1446,35 +1442,32 @@ struct RingView: View {
     private func noticeCard(_ n: RingModel.Notice) -> some View {
         let track: CGFloat = 196
         return ZStack {
-            Circle().stroke(Color(white: 0.13).opacity(0.9), lineWidth: 34).frame(width: track * 2, height: track * 2)
-            Circle().stroke(Color.white.opacity(0.14), style: StrokeStyle(lineWidth: 1.5, dash: [3, 9]))
+            GlassShape(shape: Ring(radius: track, width: 34), live: model.glass, glowStrength: 0.35)
+            Circle().stroke(Color.white.opacity(0.20), style: StrokeStyle(lineWidth: 1, dash: [3, 9]))
                 .frame(width: track * 2, height: track * 2)
             VStack(spacing: 7) {
                 Image(systemName: n.symbol)
-                    .font(.system(size: 24, weight: .semibold))
+                    .font(.system(size: 23, weight: .medium))
                     .foregroundStyle(n.tint)
                     .frame(width: 52, height: 52)
                     .background(Circle().fill(Color.white.opacity(0.08)))
-                    .overlay(Circle().stroke(n.tint.opacity(0.55), lineWidth: 1.5))
+                    .overlay(Circle().stroke(n.tint.opacity(0.45), lineWidth: 1))
                     .padding(.bottom, 3)
                 Text(n.title)
-                    .font(.system(size: 17, weight: .bold, design: .rounded))
+                    .font(.system(size: 16, weight: .semibold))
                     .multilineTextAlignment(.center)
                 Text(n.detail)
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .lineSpacing(2).opacity(0.78)
+                    .font(.system(size: 12))
+                    .lineSpacing(2).opacity(0.72)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
                 Text("Click anywhere to close")
-                    .font(.system(size: 10, weight: .medium)).opacity(0.45).padding(.top, 5)
+                    .font(.system(size: 10)).opacity(0.45).padding(.top, 5)
             }
             .foregroundStyle(.white)
             .padding(.horizontal, 20).padding(.vertical, 18)
             .frame(width: 264)
-            .background(RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .fill(RadialGradient(colors: [Color(white: 0.22), Color(white: 0.08)], center: .top, startRadius: 4, endRadius: 260)))
-            .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous).stroke(Color.white.opacity(0.22), lineWidth: 1.5))
-            .shadow(color: .black.opacity(0.5), radius: 12)
+            .background(WheelGlass(outline: { Path(roundedRect: $0, cornerRadius: 26, style: .continuous) }, live: model.glass))
         }
         .transition(.scale(scale: 0.9).combined(with: .opacity))
     }
@@ -1493,22 +1486,27 @@ struct RingView: View {
         let tint = unread ? a.color : a.color(freshness: fresh)
         let startGap = s.joinsPrevious ? Wedge.hairline : Wedge.gap, endGap = s.joinsNext ? Wedge.hairline : Wedge.gap
         let shape = Wedge(start: start, end: end, inner: s.inner, outer: outer, startGap: startGap, endGap: endGap)
-        let rim = Wedge(start: start, end: end, inner: outer - 7, outer: outer, startGap: startGap, endGap: endGap)
-        let fill: AnyShapeStyle = urgent
-            ? AnyShapeStyle(RadialGradient(colors: [Color(red: 1.0, green: 0.62, blue: 0.40), Palette.accent, Color(red: 0.93, green: 0.30, blue: 0.30)],
-                                           center: .center, startRadius: s.inner, endRadius: outer))
-            : AnyShapeStyle(RadialGradient(colors: [Color(white: on ? 0.36 : 0.20), Color(white: on ? 0.26 : 0.11)],
-                                           center: .center, startRadius: s.inner, endRadius: outer))
+        // Over the glass: the accent for an agent that needs you, and otherwise its project's
+        // color, so that a project can be found without reading.
+        let wash: Color? = urgent
+            ? Palette.accent.opacity(on ? 0.82 : 0.68)
+            : s.project.map { Palette.projects[$0 % Palette.projects.count].opacity(on ? 0.30 : 0.12 + 0.10 * fresh) }
         let radius = s.inner + (outer - s.inner) * 0.54
         let arcWidth = CGFloat(end - start) * radius
+        // A slim light just inside the rim, in the color of what the agent is doing.
+        let lampInset = Double(13 / outer)
         return ZStack {
-            shape.fill(fill).opacity(urgent ? 1 : 0.95)
-            // Its project's color, under everything else, so that a project can be found without reading.
-            if !urgent, let p = s.project { shape.fill(Palette.projects[p % Palette.projects.count]).opacity(on ? 0.34 : 0.14 + 0.10 * fresh) }
-            if !urgent {
-                rim.fill(tint).opacity(a.status == "working" ? 0.55 + 0.45 * pulse : 0.9)
+            // An agent that has finished and not been looked at glows, as one that is asking does.
+            GlassShape(shape: shape, live: model.glass, wash: wash, lit: on, shade: urgent ? 0 : 0.22,
+                       glow: urgent ? Palette.accent : (unread ? a.color : .black),
+                       glowStrength: urgent ? 0.40 + 0.35 * pulse : (unread ? 0.70 : (on ? 0.50 : 0.30)),
+                       spread: urgent || unread ? 15 : 9, drop: urgent || unread ? 0 : (on ? 5 : 2))
+            if !urgent, end - start > 2 * lampInset + 0.02 {
+                Arc(start: start + lampInset, end: end - lampInset, radius: outer - 6.5)
+                    .stroke(tint, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                    .shadow(color: tint.opacity(0.8), radius: 3)
+                    .opacity(a.status == "working" ? 0.45 + 0.55 * pulse : 0.9)
             }
-            shape.stroke(on ? Color.white : Color.white.opacity(urgent ? 0.5 : 0.10), lineWidth: on ? 3 : 1)
             // A wedge that rests too narrow for the usual label keeps just its picture and name.
             if arcWidth < 56 {
                 // Too thin to write across, so the label runs along it, the right way up on either side.
@@ -1523,14 +1521,11 @@ struct RingView: View {
             }
             if s.pinned {
                 Image(systemName: "pin.fill")
-                    .font(.system(size: 10, weight: .bold)).rotationEffect(.degrees(45))
-                    .foregroundStyle(Color.white.opacity(0.9))
-                    .offset(x: CGFloat(cos(s.mid)) * (outer - 19), y: CGFloat(sin(s.mid)) * (outer - 19))
+                    .font(.system(size: 9.5, weight: .semibold)).rotationEffect(.degrees(45))
+                    .foregroundStyle(Color.white.opacity(urgent ? 0.9 : 0.6))
+                    .offset(x: CGFloat(cos(s.mid)) * (outer - 21), y: CGFloat(sin(s.mid)) * (outer - 21))
             }
         }
-        // An agent that has finished and not been looked at glows, as one that is asking does.
-        .shadow(color: urgent ? Palette.accent.opacity(0.45 + 0.4 * pulse) : (unread ? a.color.opacity(0.75) : .black.opacity(0.35)),
-                radius: urgent ? 16 : (unread ? 15 : 6))
         .offset(x: CGFloat(cos(s.mid)) * pop, y: CGFloat(sin(s.mid)) * pop)
     }
 
@@ -1546,7 +1541,7 @@ struct RingView: View {
         let detail = brief ? (s.ago ?? s.busyFor ?? "") : (a.tab.isEmpty || (family && a.title.isEmpty) ? state : "\(a.tab) · \(state)")
         return VStack(spacing: 3) {
             icon(a, t: t)
-                .font(.system(size: urgent ? 30 : 25, weight: .semibold))
+                .font(.system(size: urgent ? 28 : 23, weight: .medium))
                 .foregroundStyle(urgent ? Color.white : tint)
                 .frame(height: urgent ? 36 : 30)
                 .overlay {
@@ -1555,11 +1550,11 @@ struct RingView: View {
                         helpersPill(a.subAgents, urgent: urgent).fixedSize().offset(x: urgent ? 31 : 28, y: -9)
                     }
                 }
-            name(s.name).font(.system(size: family ? (urgent ? 13.5 : 12.5) : (urgent ? 15.5 : 14), weight: .bold, design: .rounded))
+            name(s.name).font(.system(size: family ? (urgent ? 13.5 : 12.5) : (urgent ? 15 : 13.5), weight: .semibold))
             if s.sibling, !brief, !a.title.isEmpty {
                 // What the session is about, when there is room for all of it.
                 ViewThatFits(in: .horizontal) {
-                    Text(a.title).font(.system(size: 11, weight: .semibold, design: .rounded)).fixedSize().opacity(0.92)
+                    Text(a.title).font(.system(size: 11, weight: .medium)).fixedSize().opacity(0.88)
                     Color.clear.frame(width: 0, height: 0)
                 }
             }
@@ -1569,7 +1564,7 @@ struct RingView: View {
                     Text(detail).lineLimit(1).fixedSize()
                     Text(brief ? detail : state).lineLimit(1)
                 }
-                .font(.system(size: 11.5, weight: .medium)).opacity(0.82)
+                .font(.system(size: 11)).opacity(urgent ? 0.88 : 0.70)
             }
         }
         .foregroundStyle(.white)
@@ -1582,7 +1577,7 @@ struct RingView: View {
     /// even a word does not fit. Never with part of it left out.
     private func name(_ text: String) -> some View {
         let words = text.split(separator: " ").map(String.init)
-        let small = Font.system(size: 11, weight: .bold, design: .rounded)
+        let small = Font.system(size: 11, weight: .semibold)
         return ViewThatFits(in: .horizontal) {
             Text(text).fixedSize()
             if words.count > 1 { VStack(spacing: 0) { ForEach(words, id: \.self) { Text($0).fixedSize() } } }
@@ -1598,19 +1593,19 @@ struct RingView: View {
         let a = s.agent
         return HStack(spacing: 4) {
             icon(a, t: t)
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(a.needsYou ? Color.white : tint)
             // The whole name with the time, the name alone, or its two letters: whichever fits.
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 4) {
                     Text(s.name).fixedSize()
-                    if let since = s.ago ?? s.busyFor { Text(since).font(.system(size: 10.5, weight: .medium)).opacity(0.75).fixedSize() }
+                    if let since = s.ago ?? s.busyFor { Text(since).font(.system(size: 10.5)).opacity(0.7).fixedSize() }
                 }
                 Text(s.name).fixedSize()
-                Text(s.name).font(.system(size: 10.5, weight: .bold, design: .rounded)).fixedSize()
+                Text(s.name).font(.system(size: 10.5, weight: .semibold)).fixedSize()
                 Text(AgentNames.monogram(s.name)).fixedSize()
             }
-            .font(.system(size: 12, weight: .bold, design: .rounded))
+            .font(.system(size: 12, weight: .semibold))
         }
         .foregroundStyle(.white)
         .frame(width: max(40, length))
@@ -1620,29 +1615,28 @@ struct RingView: View {
     /// How many sub-agents the agent has busy right now.
     private func helpersPill(_ count: Int, urgent: Bool) -> some View {
         HStack(spacing: 2) {
-            Image(systemName: "arrow.triangle.branch").font(.system(size: 8, weight: .heavy))
-            Text("\(count)").font(.system(size: 10.5, weight: .heavy, design: .rounded))
+            Image(systemName: "arrow.triangle.branch").font(.system(size: 8, weight: .bold))
+            Text("\(count)").font(.system(size: 10.5, weight: .semibold))
         }
         .foregroundStyle(.white)
         .padding(.horizontal, 5).padding(.vertical, 1.5)
-        .background(Capsule().fill(urgent ? Color.black.opacity(0.30) : Color.white.opacity(0.18)))
-        .overlay(Capsule().stroke(Color.white.opacity(0.30), lineWidth: 0.75))
+        .background(Capsule().fill(Color.white.opacity(urgent ? 0.24 : 0.16)))
+        .overlay(Capsule().stroke(Color.white.opacity(urgent ? 0.35 : 0.20), lineWidth: 0.5))
     }
 
-    /// The space's name on a dark strip just outside its sessions.
+    /// The space's name on a strip of glass just outside its sessions.
     private func band(_ b: RingModel.Band) -> some View {
         // When one of its sessions is pointed at, the band moves out with it rather than being covered.
         let lifted = model.slices.first { $0.id == model.highlighted && b.members.contains($0.id) }
         let radius = lifted.map { $0.reach + 16 + RingModel.Band.lift } ?? b.radius
         let trim = Double(13 / radius)   // room for the strip's round ends
         return ZStack {
-            Arc(start: b.start + trim, end: b.end - trim, radius: radius)
-                .stroke(Color(white: 0.09).opacity(0.92), style: StrokeStyle(lineWidth: 18, lineCap: .round))
+            GlassShape(shape: ArcStrip(start: b.start + trim, end: b.end - trim, radius: radius, width: 18),
+                       live: model.glass, shade: 0.22, glowStrength: 0.30, spread: 6, drop: 2)
             ArcText(text: b.name, mid: (b.start + b.end) / 2, radius: radius,
                     room: CGFloat(b.end - b.start - 2 * trim) * radius)
-                .foregroundStyle(Color.white.opacity(0.9))
+                .foregroundStyle(Color.white.opacity(0.88))
         }
-        .shadow(color: .black.opacity(0.35), radius: 4)
     }
 
     /// A little moving picture of what the agent is doing.
@@ -1685,14 +1679,14 @@ struct RingView: View {
                 // nobody waiting, that is the agent a click goes back to.
                 if model.onHub, model.centreIsBack {
                     HStack(spacing: 3) {
-                        Image(systemName: "arrow.uturn.backward").font(.system(size: 8.5, weight: .bold))
-                        Text("back to").font(.system(size: 9.5, weight: .semibold))
+                        Image(systemName: "arrow.uturn.backward").font(.system(size: 8.5, weight: .semibold))
+                        Text("back to").font(.system(size: 9.5, weight: .medium))
                     }
                     .opacity(0.7)
                 }
-                name(pointed.name).font(.system(size: 13, weight: .bold, design: .rounded)).frame(width: RingModel.hubRadius * 2 - 14)
+                name(pointed.name).font(.system(size: 13, weight: .semibold)).frame(width: RingModel.hubRadius * 2 - 14)
                 Text(pointed.folded > 0 ? "idle" : (pointed.ago ?? pointed.busyFor.map { "working \($0)" } ?? focus.statusWord))
-                    .font(.system(size: 10.5, weight: .semibold)).foregroundStyle(focus.needsYou ? Palette.accent : focus.color)
+                    .font(.system(size: 10.5, weight: .medium)).foregroundStyle(focus.needsYou ? Palette.accent : focus.color)
                 // What a click does is said the first few times, and whenever it would do nothing.
                 if !model.canJump {
                     Text("no Herdr app").font(.system(size: 9.5)).opacity(0.6)
@@ -1701,31 +1695,53 @@ struct RingView: View {
                         .font(.system(size: 9)).opacity(0.5).multilineTextAlignment(.center).frame(width: RingModel.hubRadius * 2 - 16)
                 }
             } else if waiting > 0 {
-                Text("\(waiting)").font(.system(size: 26, weight: .bold, design: .rounded)).foregroundStyle(Palette.accent)
-                Text(waiting == 1 ? "needs you" : "need you").font(.system(size: 10.5)).opacity(0.8)
+                Text("\(waiting)").font(.system(size: 26, weight: .semibold)).foregroundStyle(Palette.accent)
+                Text(waiting == 1 ? "needs you" : "need you").font(.system(size: 10.5)).opacity(0.75)
             } else {
-                Text("\(model.slices.reduce(0) { $0 + max($1.folded, 1) })").font(.system(size: 26, weight: .bold, design: .rounded))
-                Text("agents").font(.system(size: 10.5)).opacity(0.8)
+                Text("\(model.slices.reduce(0) { $0 + max($1.folded, 1) })").font(.system(size: 26, weight: .semibold))
+                Text("agents").font(.system(size: 10.5)).opacity(0.75)
             }
         }
         .foregroundStyle(.white)
         .frame(width: RingModel.hubRadius * 2, height: RingModel.hubRadius * 2)
-        .background(Circle().fill(RadialGradient(colors: [Color(white: 0.22), Color(white: 0.08)], center: .top, startRadius: 4, endRadius: 90)))
         // With the pointer on it, the hub is a button for the agent it names.
-        .overlay(Circle().stroke(model.onHub ? Palette.accent : Color.white.opacity(0.22), lineWidth: model.onHub ? 2.5 : 1.5))
-        .shadow(color: model.onHub ? Palette.accent.opacity(0.55) : .black.opacity(0.5), radius: 10)
+        .background(WheelGlass(outline: { Path(ellipseIn: $0) }, live: model.glass, lit: model.onHub,
+                               glow: model.onHub ? Palette.accent : .black, glowStrength: model.onHub ? 0.60 : 0.45,
+                               drop: model.onHub ? 0 : 4))
+        .overlay(Circle().stroke(Palette.accent.opacity(model.onHub ? 0.9 : 0), lineWidth: 1.5))
     }
 }
 
-/// The dark glass the wheel's cards are made of. On the screen, what is behind the window shows
-/// through it, blurred, the way it does through a menu. In a picture or a test there is nothing
-/// behind to blur, and it is the same dark, only see-through.
+private extension View {
+    /// Faded, but only when it is: glass under a view that is less than fully opaque stops
+    /// blurring, so the wheel is given no opacity of its own until it steps back.
+    @ViewBuilder func faded(_ amount: Double) -> some View {
+        if amount < 1 { opacity(amount) } else { self }
+    }
+}
+
+/// The dark glass the wheel is made of. On the screen, what is behind the window shows through
+/// it, blurred, the way it does through a menu. In a picture or a test there is nothing behind
+/// to blur, and it is the same dark, only see-through.
 struct WheelGlass: View {
-    /// The card's outline, given its frame. It may reach outside the frame by up to `bleed`,
-    /// as a bubble's tail does.
+    /// The pane's outline, given its frame. It may reach outside the frame by up to `bleed`,
+    /// as a bubble's arrow does.
     let outline: (CGRect) -> Path
     var live = false
-    /// How far outside its frame the card is still drawn: its tail, and its shadow.
+    /// A color laid over the glass: a project's, or the accent of an agent that needs you.
+    var wash: Color? = nil
+    /// Brighter, with a stronger rim: what the pointer is on.
+    var lit = false
+    /// How much darker than the plain glass. A wedge's small white words sit straight on the
+    /// glass, and have to read over a white window too.
+    var shade = 0.0
+    /// The shadow round the pane. In a color other than black it is a glow.
+    var glow = Color.black
+    var glowStrength = 0.55
+    /// How soft the shadow is, and how far below the pane it falls.
+    var spread: CGFloat = 11
+    var drop: CGFloat = 5
+    /// How far outside its frame the pane is still drawn: its arrow, and its shadow.
     static let bleed: CGFloat = 40
 
     var body: some View {
@@ -1734,38 +1750,41 @@ struct WheelGlass: View {
             let path = outline(CGRect(origin: .zero, size: g.size))
             let wide = CGSize(width: g.size.width + 2 * b, height: g.size.height + 2 * b)
             let moved = path.offsetBy(dx: b, dy: b)
-            // Everything is placed from the card's top-left corner; what reaches outside it starts `bleed` before.
+            // Everything is placed from the pane's top-left corner; what reaches outside it starts `bleed` before.
             ZStack(alignment: .topLeading) {
                 // A shadow round the outside only: under glass it would show through as a stain.
-                moved.fill(Color.black.opacity(0.55))
+                moved.fill(glow.opacity(glowStrength))
                     .frame(width: wide.width, height: wide.height)
-                    .blur(radius: 11).offset(y: 5)
+                    .blur(radius: spread).offset(y: drop)
                     .mask(Self.outside(moved, in: wide).fill(style: FillStyle(eoFill: true)))
                     .offset(x: -b, y: -b)
                 if live {
+                    // Never faded: at 0.86 opacity this view blurred nothing, and what was behind
+                    // the glass showed through it sharp (macOS 26.7).
                     BlurBehind(path: moved, size: wide).frame(width: wide.width, height: wide.height)
-                        .opacity(Self.blurStrength)
                         .offset(x: -b, y: -b)
                     path.fill(Self.tint)
                 } else {
                     path.fill(Self.standIn)
                 }
+                if shade > 0 { path.fill(Color.black.opacity(shade)) }
+                if let wash { path.fill(wash) }
+                if lit { path.fill(Self.shine) }
                 // Light catches the top edge of glass and leaves the bottom one.
-                path.stroke(LinearGradient(colors: [Color.white.opacity(0.44), Color.white.opacity(0.13)],
-                                           startPoint: .top, endPoint: .bottom), lineWidth: 1.5)
+                path.stroke(LinearGradient(colors: [Color.white.opacity(lit ? 0.80 : 0.44), Color.white.opacity(lit ? 0.30 : 0.13)],
+                                           startPoint: .top, endPoint: .bottom), lineWidth: 1)
             }
             .frame(width: g.size.width, height: g.size.height, alignment: .topLeading)
         }
     }
 
-    /// How much of the card is the blur. The rest lets what is behind through as it is, so the
-    /// glass is see-through even over a dark desktop, where a blur alone looks solid.
-    static let blurStrength = 0.86
-    /// Laid over the blur, so that white words read whatever is behind. The three numbers here
-    /// are the ones to change for glass that is clearer or more solid.
+    /// Laid over the blur, so that white words read whatever is behind. This and the two numbers
+    /// below are the ones to change for glass that is clearer or more solid.
     static let tint = Color.black.opacity(0.14)
     /// The glass where nothing can be blurred.
     static let standIn = Color(white: 0.07).opacity(0.76)
+    /// Laid over a pane that the pointer is on.
+    static let shine = Color.white.opacity(0.13)
 
     private static func outside(_ path: Path, in size: CGSize) -> Path {
         var p = Path(CGRect(origin: .zero, size: size))
@@ -1773,7 +1792,7 @@ struct WheelGlass: View {
         return p
     }
 
-    /// What is behind the window, blurred, in the shape of the card.
+    /// What is behind the window, blurred, in the shape of the pane.
     private struct BlurBehind: NSViewRepresentable {
         let path: Path
         let size: CGSize
@@ -1812,25 +1831,91 @@ struct WheelGlass: View {
     }
 }
 
-/// A speech bubble of dark glass with the agent's question in it.
+/// A pane of the wheel's glass in a shape that is drawn on the whole wheel, as a wedge is. The
+/// glass is only as large as the shape, and it follows the shape while that grows or moves.
+struct GlassShape<S: Shape>: View, Animatable {
+    var shape: S
+    var live = false
+    var wash: Color? = nil
+    var lit = false
+    var shade = 0.0
+    var glow = Color.black
+    var glowStrength = 0.55
+    var spread: CGFloat = 11
+    var drop: CGFloat = 5
+
+    var animatableData: S.AnimatableData {
+        get { shape.animatableData }
+        set { shape.animatableData = newValue }
+    }
+
+    var body: some View {
+        GeometryReader { g in
+            let path = shape.path(in: CGRect(origin: .zero, size: g.size))
+            if !path.isEmpty {
+                let box = path.boundingRect.integral
+                WheelGlass(outline: { _ in path.offsetBy(dx: -box.minX, dy: -box.minY) }, live: live, wash: wash, lit: lit,
+                           shade: shade, glow: glow, glowStrength: glowStrength, spread: spread, drop: drop)
+                    .frame(width: box.width, height: box.height)
+                    .position(x: box.midX, y: box.midY)
+            }
+        }
+    }
+}
+
+/// A strip along part of a circle with round ends, as an outline that glass can take.
+struct ArcStrip: Shape {
+    var start: Double
+    var end: Double
+    var radius: CGFloat
+    var width: CGFloat
+
+    var animatableData: AnimatablePair<CGFloat, AnimatablePair<Double, Double>> {
+        get { AnimatablePair(radius, AnimatablePair(start, end)) }
+        set { radius = newValue.first; start = newValue.second.first; end = newValue.second.second }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        Arc(start: start, end: end, radius: radius).path(in: rect)
+            .strokedPath(StrokeStyle(lineWidth: width, lineCap: .round))
+    }
+}
+
+/// A whole ring, as an outline that glass can take.
+struct Ring: Shape {
+    var radius: CGFloat
+    var width: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        Path(ellipseIn: CGRect(x: rect.midX - radius, y: rect.midY - radius, width: radius * 2, height: radius * 2))
+            .strokedPath(StrokeStyle(lineWidth: width))
+    }
+}
+
+/// A panel of dark glass with the agent's question in it, and an arrow towards the agent's wedge.
 struct SpeechBubble: View {
     let agent: AgentInfo
     let bubble: RingModel.Bubble
 
-    private struct Tail: Shape {
+    /// A small arrow on the side of the panel that faces the wedge, like a popover's.
+    private struct Arrow: Shape {
         let toward: CGSize
+        /// How far it reaches past the panel's edge.
+        static let reach: CGFloat = 12
+
         func path(in rect: CGRect) -> Path {
             let c = CGPoint(x: rect.midX, y: rect.midY)
             let tx = toward.width, ty = toward.height
-            // Distance from the centre to the bubble's edge in that direction.
+            guard abs(tx) > 0.001 || abs(ty) > 0.001 else { return Path() }
+            // Distance from the centre to the panel's edge in that direction.
             let edge = min(abs(tx) > 0.001 ? rect.width / 2 / abs(tx) : .infinity,
                            abs(ty) > 0.001 ? rect.height / 2 / abs(ty) : .infinity)
-            let tip = CGPoint(x: c.x + tx * (edge + 26), y: c.y + ty * (edge + 26))
+            let tip = CGPoint(x: c.x + tx * (edge + Self.reach), y: c.y + ty * (edge + Self.reach))
             let base = CGPoint(x: c.x + tx * (edge - 14), y: c.y + ty * (edge - 14))
-            let px = -ty * 15, py = tx * 15
+            let px = -ty * 22, py = tx * 22   // 20 wide where it leaves the panel
             var p = Path()
-            p.move(to: tip)
-            p.addLine(to: CGPoint(x: base.x + px, y: base.y + py))
+            p.move(to: CGPoint(x: base.x + px, y: base.y + py))
+            p.addArc(tangent1End: tip, tangent2End: CGPoint(x: base.x - px, y: base.y - py), radius: 3)
             p.addLine(to: CGPoint(x: base.x - px, y: base.y - py))
             p.closeSubpath()
             return p
@@ -1839,15 +1924,17 @@ struct SpeechBubble: View {
 
     @ObservedObject var model: RingModel
 
-    /// The bubble and its tail as one outline, so that glass has no seam where they meet.
+    /// The panel and its arrow as one outline, so that glass has no seam where they meet.
     static func outline(_ rect: CGRect, toward: CGSize) -> Path {
-        let box = Path(roundedRect: rect, cornerRadius: 24, style: .continuous)
-        return Path(box.cgPath.union(Tail(toward: toward).path(in: rect).cgPath))
+        let box = Path(roundedRect: rect, cornerRadius: 22, style: .continuous)
+        let arrow = Arrow(toward: toward).path(in: rect)
+        return arrow.isEmpty ? box : Path(box.cgPath.union(arrow.cgPath))
     }
 
     var body: some View {
         let speech = agent.speech(full: bubble.expanded)
         let ink = Color.white.opacity(0.96)
+        let quiet = Color.white.opacity(0.60)
         let approval = agent.needsYou ? agent.permission : nil
         let slice = model.slices.first { $0.id == agent.id }
         let ago = slice?.ago ?? (agent.needsYou ? nil : slice?.busyFor)
@@ -1862,20 +1949,20 @@ struct SpeechBubble: View {
 
             HStack(spacing: 6) {
                 if approval != nil {
-                    Image(systemName: "exclamationmark.shield.fill").font(.system(size: 11, weight: .bold)).foregroundStyle(Palette.accent)
+                    Image(systemName: "exclamationmark.shield.fill").font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.accent)
                 } else {
-                    Circle().fill(agent.needsYou ? Palette.accent : agent.color).frame(width: 8, height: 8)
+                    Circle().fill(agent.needsYou ? Palette.accent : agent.color).frame(width: 7, height: 7)
                 }
-                Text("\(agent.space.uppercased())  ·  \(heading.uppercased())" + (ago.map { "  ·  \($0.uppercased())" } ?? ""))
-                    .font(.system(size: 10, weight: .heavy)).kerning(0.5)
-                    .foregroundStyle(agent.needsYou ? Palette.accent : Color.white.opacity(0.62)).lineLimit(1).minimumScaleFactor(0.6)
+                (Text(agent.space).fontWeight(.semibold).foregroundColor(ink)
+                 + Text("  ·  \(heading)").foregroundColor(agent.needsYou ? Palette.accent : quiet)
+                 + Text(ago.map { "  ·  \($0)" } ?? "").foregroundColor(quiet))
+                    .font(.system(size: 11, weight: .medium)).lineLimit(1).minimumScaleFactor(0.6)
             }
             .frame(width: bubble.size.width - 2 * RingModel.pad, height: RingModel.headerHeight, alignment: .leading)
             .offset(x: RingModel.pad, y: RingModel.pad)
 
             Text(speech.text.isEmpty ? agent.title : speech.text)
-                .font(approval != nil ? .system(size: 13, weight: .medium, design: .monospaced)
-                                      : .system(size: 14, weight: .medium, design: .rounded))
+                .font(approval != nil ? .system(size: 13, design: .monospaced) : .system(size: 14))
                 .foregroundStyle(ink)
                 .lineSpacing(2)
                 .frame(width: bubble.size.width - 2 * RingModel.pad, height: bubble.textHeight, alignment: .topLeading)
@@ -1904,9 +1991,9 @@ struct SpeechBubble: View {
                      : (!bubble.expanded && agent.isLongQuestion) ? "Move onto the bubble to read the whole question"
                      : approval != nil ? "\(agent.prompt.isEmpty ? "Do you want to proceed?" : agent.prompt)  Click an answer to send it"
                      : "Point at an answer and click to send it"))
-                    .font(.system(size: 10.5, weight: .medium))
+                    .font(.system(size: 10.5))
                     .lineLimit(1).minimumScaleFactor(0.85)
-                    .foregroundStyle(Color.white.opacity(0.58))
+                    .foregroundStyle(quiet)
                     .frame(width: bubble.size.width - 2 * RingModel.pad, height: RingModel.hintHeight, alignment: .center)
                     .offset(x: RingModel.pad, y: bubble.size.height - RingModel.pad - RingModel.hintHeight + 6)
             }
@@ -1917,85 +2004,69 @@ struct SpeechBubble: View {
         .animation(.easeOut(duration: 0.15), value: model.delivery)
     }
 
-    /// The explanation for the choice under the pointer, like an item tooltip in a game.
+    /// The explanation for the choice under the pointer, on its own small panel beside the bubble.
     private func hintCard(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 13, weight: .medium, design: .rounded))
-            .foregroundStyle(.white)
+            .font(.system(size: 12.5))
+            .foregroundStyle(Color.white.opacity(0.92))
             .lineSpacing(2)
             .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, 14).padding(.vertical, 11)
             .frame(width: 300, alignment: .leading)
-            .background(WheelGlass(outline: { Path(roundedRect: $0, cornerRadius: 16, style: .continuous) }, live: model.glass))
-            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Palette.accent, lineWidth: 2))
+            .background(WheelGlass(outline: { Path(roundedRect: $0, cornerRadius: 14, style: .continuous) }, live: model.glass))
             .frame(width: 300, height: RingModel.optionHeight, alignment: .topLeading)
     }
 
-    /// A chunky, game-style answer button with a key-cap number.
+    /// An answer as a row in a list, with its number on a key cap. The row under the pointer is
+    /// filled, the way the selected result is in Spotlight.
     private func answerButton(_ i: Int, _ text: String, own: Bool, deny: Bool = false, hot: Bool,
                               state: RingModel.ButtonState) -> some View {
-        let green = Color(red: 0.20, green: 0.72, blue: 0.42)
-        // The picked button says what became of the answer. On its way is the blue of an agent at
+        // The picked row says what became of the answer. On its way is the blue of an agent at
         // work, and only an answer that herdr-core has pressed is the green of done.
         let tint: Color?
         switch state {
         case .resting: tint = nil
-        case .sending: tint = Color(red: 0.35, green: 0.62, blue: 1.0)
-        case .sent: tint = green
+        case .sending: tint = Color(red: 0.26, green: 0.55, blue: 0.98)
+        case .sent: tint = Color(red: 0.20, green: 0.68, blue: 0.40)
         case .failed: tint = Color(red: 0.86, green: 0.27, blue: 0.25)
         }
         // Refusing looks different from agreeing, so a "No" is never picked by mistake.
-        let hotColors = deny
-            ? [Color(white: 0.56), Color(white: 0.40)]
-            : [Color(red: 1.0, green: 0.60, blue: 0.40), Palette.accent]
-        let face: AnyShapeStyle = tint.map { AnyShapeStyle(LinearGradient(colors: [$0.opacity(0.9), $0], startPoint: .top, endPoint: .bottom)) }
-            ?? (hot
-                ? AnyShapeStyle(LinearGradient(colors: hotColors, startPoint: .top, endPoint: .bottom))
-                : AnyShapeStyle(LinearGradient(colors: [Color.white.opacity(0.17), Color.white.opacity(0.10)], startPoint: .top, endPoint: .bottom)))
+        let face: Color = tint?.opacity(0.92)
+            ?? (hot ? (deny ? Color.white.opacity(0.30) : Palette.accent.opacity(0.94)) : Color.white.opacity(0.08))
         let lit = hot || tint != nil
+        let row = RoundedRectangle(cornerRadius: 11, style: .continuous)
         return HStack(spacing: 10) {
             ZStack {
-                RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Color.white.opacity(lit ? 1 : 0.92))
-                switch state {
-                case .sent:
-                    Image(systemName: "checkmark").font(.system(size: 12, weight: .heavy)).foregroundStyle(green)
-                case .sending:
-                    Image(systemName: "paperplane.fill").font(.system(size: 12, weight: .heavy)).foregroundStyle(tint ?? .blue)
-                case .failed:
-                    Image(systemName: "exclamationmark").font(.system(size: 13, weight: .heavy)).foregroundStyle(tint ?? .red)
-                case .resting:
-                    if own {
-                        Image(systemName: "pencil").font(.system(size: 13, weight: .heavy))
-                            .foregroundStyle(hot ? (deny ? Color(white: 0.2) : Palette.accent) : Color(white: 0.12))
-                    } else {
-                        Text("\(i + 1)").font(.system(size: 13, weight: .heavy, design: .rounded))
-                            .foregroundStyle(hot ? (deny ? Color(white: 0.2) : Palette.accent) : Color(white: 0.12))
+                RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.white.opacity(lit ? 0.24 : 0.12))
+                Group {
+                    switch state {
+                    case .sent: Image(systemName: "checkmark")
+                    case .sending: Image(systemName: "paperplane.fill")
+                    case .failed: Image(systemName: "exclamationmark")
+                    case .resting:
+                        if own { Image(systemName: "pencil") } else { Text("\(i + 1)") }
                     }
                 }
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(lit ? 1 : 0.72))
             }
-            .frame(width: 26, height: 26)
+            .frame(width: 24, height: 24)
             Text(text)
-                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                .font(.system(size: 14, weight: .medium))
                 .italic(own)
-                .foregroundStyle(Color.white.opacity(lit ? 1 : (own ? 0.62 : 0.96)))
+                .foregroundStyle(Color.white.opacity(lit ? 1 : (own ? 0.60 : 0.96)))
                 .lineLimit(1).minimumScaleFactor(0.78)
             Spacer(minLength: 0)
             if hot && tint == nil {
-                Image(systemName: "arrow.right.circle.fill").font(.system(size: 17)).foregroundStyle(.white)
+                Image(systemName: "arrow.right").font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.9)).padding(.trailing, 4)
             }
         }
         .padding(.horizontal, 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(RoundedRectangle(cornerRadius: 13, style: .continuous).fill(face))
-        .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous)
-            .stroke(Color.white.opacity(lit ? 0 : 0.17), lineWidth: 1))
-        // A darker lip underneath gives the button some depth.
-        .background(RoundedRectangle(cornerRadius: 13, style: .continuous)
-            .fill(tint.map { $0.opacity(0.55) }
-                  ?? (hot ? (deny ? Color(white: 0.24) : Color(red: 0.78, green: 0.26, blue: 0.20)) : Color.black.opacity(0.30)))
-            .offset(y: hot ? 2 : 3))
-        .offset(y: hot ? 1 : 0)
-        .scaleEffect(hot ? 1.025 : 1)
+        .background(row.fill(face))
+        .overlay(row.stroke(Color.white.opacity(lit ? 0.28 : 0.09), lineWidth: 1))
+        .scaleEffect(hot ? 1.012 : 1)
     }
 }
 
@@ -2540,26 +2611,29 @@ private struct ReplyView: View {
 
     var body: some View {
         let ink = Color.white.opacity(0.96)
-        VStack(alignment: .leading, spacing: 8) {
+        let quiet = Color.white.opacity(0.60)
+        let field = RoundedRectangle(cornerRadius: 11, style: .continuous)
+        VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 6) {
-                Circle().fill(Palette.accent).frame(width: 8, height: 8)
-                Text("\(agent.space.uppercased())  ·  YOUR ANSWER")
-                    .font(.system(size: 10, weight: .heavy)).kerning(0.5).foregroundStyle(Palette.accent)
+                Circle().fill(Palette.accent).frame(width: 7, height: 7)
+                (Text(agent.space).fontWeight(.semibold).foregroundColor(ink)
+                 + Text("  ·  Your answer").foregroundColor(Palette.accent))
+                    .font(.system(size: 11, weight: .medium)).lineLimit(1)
             }
             Text(agent.speech.text)
-                .font(.system(size: 12, weight: .medium, design: .rounded))
-                .foregroundStyle(Color.white.opacity(0.66)).lineLimit(3)
+                .font(.system(size: 12))
+                .foregroundStyle(quiet).lineLimit(3)
             TextField("Type your answer…", text: $text)
                 .textFieldStyle(.plain)
-                .font(.system(size: 15, weight: .medium, design: .rounded))
+                .font(.system(size: 17))
                 .foregroundStyle(ink)
                 .padding(.horizontal, 12).padding(.vertical, 10)
-                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.white.opacity(0.10)))
-                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Palette.accent, lineWidth: 2))
+                .background(field.fill(Color.white.opacity(0.09)))
+                .overlay(field.stroke(Color.white.opacity(0.12), lineWidth: 1))
                 .focused($focused)
                 .onSubmit { submit() }
             HStack {
-                Text("Return to send  ·  Esc to cancel").font(.system(size: 10.5, weight: .medium)).foregroundStyle(Color.white.opacity(0.58))
+                Text("Return to send  ·  Esc to cancel").font(.system(size: 10.5)).foregroundStyle(quiet)
                 Spacer()
                 Button("Send") { submit() }
                     .buttonStyle(.borderedProminent).tint(Palette.accent).controlSize(.small)
@@ -2569,7 +2643,7 @@ private struct ReplyView: View {
         .padding(16)
         .frame(width: 420)
         // The same glass as the bubble it takes the place of.
-        .background(WheelGlass(outline: { Path(roundedRect: $0, cornerRadius: 24, style: .continuous) }, live: true))
+        .background(WheelGlass(outline: { Path(roundedRect: $0, cornerRadius: 22, style: .continuous) }, live: true))
         .padding(WheelGlass.bleed)   // room for the shadow
         .colorScheme(.dark)
         .onExitCommand { cancel() }

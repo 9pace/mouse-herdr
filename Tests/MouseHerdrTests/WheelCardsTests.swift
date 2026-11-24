@@ -169,6 +169,41 @@ final class WheelCardsTests: XCTestCase {
         XCTAssertEqual(mask.size, CGSize(width: 400 + 2 * WheelGlass.bleed, height: 300 + 2 * WheelGlass.bleed))
     }
 
+    func testTheBlurIsNeverFaded() throws {
+        // A blurring view that is less than fully opaque, or sits in one that is, blurs nothing:
+        // what is behind the glass shows through it sharp.
+        var view: NSView? = try XCTUnwrap(descendants(of: card(live: true), NSVisualEffectView.self).first)
+        while let v = view {
+            XCTAssertEqual(v.alphaValue, 1, "\(type(of: v))")
+            XCTAssertEqual(v.layer?.opacity ?? 1, 1, "\(type(of: v))")
+            view = v.superview
+        }
+    }
+
+    func testOnTheScreenEveryWedgeAndTheHubAreGlassCutToTheirOwnShape() throws {
+        let model = RingModel()
+        model.herdr = .running(agents: 3)
+        model.layout([agent("t1", "working"), agent("t2", "done"), agent("t3", "blocked")])
+        model.glass = true
+        let host = NSHostingView(rootView: RingView(model: model))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: RingView.side, height: RingView.side),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        addTeardownBlock { window.close() }
+
+        let panes = descendants(of: host, NSVisualEffectView.self)
+        XCTAssertEqual(panes.count, model.slices.count + 1)
+        for pane in panes {
+            // Its own size and not the wheel's: a wedge is drawn on the whole wheel, and glass
+            // that large for each would be a dozen blurs of everything behind the wheel.
+            let mask = try XCTUnwrap(pane.maskImage)
+            XCTAssertLessThan(mask.size.width, RingView.side / 2)
+            XCTAssertLessThan(mask.size.height, RingView.side / 2)
+        }
+    }
+
     func testOffTheScreenTheCardsAreNotGlass() {
         // A picture or a test has nothing behind the window to show through, and a picture
         // cannot draw a view that blurs.

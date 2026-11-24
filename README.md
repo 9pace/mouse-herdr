@@ -76,11 +76,12 @@ Click the GIF to watch **MouseHerdr: Welcome to My Herd** on YouTube
 - Point at an agent that is not asking and the wheel writes underneath which space and
   tab it is in and what its session is about, in full, where the wedge has room only for
   a short name.
-- If it asked a question, a speech bubble of dark glass shows it. Each offered choice is a
-  button you can click to answer without leaving what you're doing; hovering a choice shows
-  its explanation, and "Type your own answer…" opens a small text box. The bubble sits just
-  beyond its wedge, or round the wheel from it where the screen ends too soon, and what
-  is behind it shows through, blurred.
+- The wheel is dark glass. What is behind it shows through each wedge, blurred, and a slim
+  light inside a wedge's rim has the color of what its agent is doing.
+- If it asked a question, a panel of the same glass shows it. Each offered choice is a row
+  you can click to answer without leaving what you're doing; hovering a choice shows its
+  explanation, and "Type your own answer…" opens a small text box. The panel sits just
+  beyond its wedge, or round the wheel from it where the screen ends too soon.
 - The choice you clicked is blue while the answer is on its way and turns green once the
   agent has it. herdr-core delivers an answer when that agent's terminal has had about
   3 seconds without typing or pointer movement, so it can take a moment if you were just
