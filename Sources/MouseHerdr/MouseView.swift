@@ -3,6 +3,8 @@ import SwiftUI
 enum Palette {
     static let accent = Color(red: 1.0, green: 0.47, blue: 0.33)
     static let accentSoft = Color(red: 1.0, green: 0.47, blue: 0.33).opacity(0.16)
+    /// One color per project on the wheel. None is near the colors that say what an agent is doing.
+    static let projects = [Color(red: 0.63, green: 0.52, blue: 1.0), Color(red: 0.96, green: 0.42, blue: 0.76), Color(red: 0.24, green: 0.80, blue: 0.86)]
 }
 
 /// A mouse's body as its profile draws it: shadow, thumb rest, body, seams and ball. No controls.

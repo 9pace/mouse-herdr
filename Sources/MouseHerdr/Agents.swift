@@ -764,6 +764,10 @@ final class RingModel: ObservableObject {
         var joinsNext = false
         /// One or two words that tell this agent from the others; never cut short.
         var name = ""
+        /// Which project it belongs to, counted from 0, for its color; nil for one in none.
+        var project: Int?
+        /// This wedge stands for the idle agents, and how many: pointing at it shows them.
+        var folded = 0
         var id: String { agent.id }
         var mid: Double { (start + end) / 2 }
         var inFamily: Bool { joinsPrevious || joinsNext }
@@ -821,6 +825,13 @@ final class RingModel: ObservableObject {
     /// A notice that stays until the wheel closes, whatever new data says.
     var heldNotice = false
     @Published var highlighted: String?
+    /// The idle agents each have a wedge. Until then they share one, so that the agents with
+    /// something going on have the wheel to themselves.
+    @Published var unfolded = false
+    /// The id of the wedge that stands for the idle agents.
+    static let foldID = "+idle"
+    /// Fewer idle agents than this are shown as they are.
+    static let foldFrom = 2
     /// The agent the hub in the middle stands for, so that it can be reached without moving the
     /// pointer, which rests on the hub as the wheel opens: the agent that most recently started
     /// waiting on you or, when nobody is, the one that was active last.
@@ -950,8 +961,13 @@ final class RingModel: ObservableObject {
         }
         // Without herdr-core there is nothing true to show, so don't leave old wedges up.
         let agents = (herdr == .notInstalled || herdr == .notRunning) ? [] : agents
-        // Every agent gets a wedge; the more there are, the thinner they all get.
-        let all = Self.arrange(agents, order: order, pinned: pinned)
+        // Every agent gets a wedge, except that the idle ones share one until they are asked for.
+        let idle = unfolded ? [] : agents.filter { $0.status == "idle" && !pinned.contains($0.id) }
+        // A wheel of nothing but idle agents shows them all: there is no one to make room for.
+        let folding = idle.count >= Self.foldFrom && idle.count < agents.count
+        let apart = folding ? agents.filter { a in !idle.contains { $0.id == a.id } } : agents
+        var all = Self.arrange(apart, order: order, pinned: pinned)
+        if folding { all.append(AgentInfo(id: Self.foldID, agent: "", status: "idle", space: "\(idle.count) idle", tab: "")) }
         outerRadius = all.count > 9 ? 300 : (all.count > 6 ? 275 : 250)
         guard !all.isEmpty else { slices = []; bands = []; highlighted = nil; centre = nil; return }
 
@@ -961,7 +977,7 @@ final class RingModel: ObservableObject {
         if let held = all.first(where: { $0.id == centre }), held.needsYou == centreWaiting {
             // still the one
         } else {
-            let pick = Self.centreAgent(all)
+            let pick = Self.centreAgent(all.filter { $0.id != Self.foldID })
             centre = pick?.id
             centreWaiting = pick?.needsYou ?? false
         }
@@ -969,12 +985,13 @@ final class RingModel: ObservableObject {
         // Agents waiting on you get wider wedges that also reach further in, so they are the closest
         // targets. Busy ones are all one size. A quiet one starts at that size and slowly gets thinner
         // and shorter the longer it sits, down to half the height, unless it is pinned.
-        let fresh = all.map { pinned.contains($0.id) ? 1 : $0.freshness(now: now) }
-        let size = all.map { pinned.contains($0.id) ? 1 : $0.size(now: now) }
+        let fresh = all.map { pinned.contains($0.id) || $0.id == Self.foldID ? 1 : $0.freshness(now: now) }
+        let size = all.map { pinned.contains($0.id) || $0.id == Self.foldID ? 1 : $0.size(now: now) }
         // Only the by-space order puts a space's sessions together, so only there are they joined up.
         let grouped = order == .space
         let sessions = Dictionary(all.map { ($0.space, 1) }, uniquingKeysWith: +)
         let names = AgentNames.names(for: all)
+        let projects = AgentNames.projects(for: all.filter { $0.id != Self.foldID }.map(\.space))
         let weights = zip(all, size).map { a, f in a.needsYou ? 1.45 : Self.quietWidth + (1 - Self.quietWidth) * f }
         let unit = min(2 * Double.pi / weights.reduce(0, +), 2 * Double.pi / 3.2)
         let spans = weights.map { $0 * unit }
@@ -993,6 +1010,8 @@ final class RingModel: ObservableObject {
             s.busyFor = a.busyFor(now: now)
             s.pinned = pinned.contains(a.id)
             s.name = names[a.id] ?? a.space
+            s.project = projects[a.space]
+            if a.id == Self.foldID { s.folded = idle.count; s.name = "+\(idle.count)" }
             // Pointed at, a wedge is as big as a busy one, and on a crowded wheel wide enough to read.
             s.widen = max(0, max(a.needsYou ? span : unit, readable) - span) / 2
             if !a.needsYou { s.raise = outerRadius - s.outer }
@@ -1289,7 +1308,9 @@ struct RingView: View {
         let fresh = on ? 1 : s.fresh
         let start = s.start - (on ? s.widen : 0), end = s.end + (on ? s.widen : 0)
         let outer = on ? s.reach : s.outer
-        let tint = a.color(freshness: fresh)
+        // Finished and not looked at since: herdr-core calls that done until the agent is opened.
+        let unread = a.status == "done"
+        let tint = unread ? a.color : a.color(freshness: fresh)
         let startGap = s.joinsPrevious ? Wedge.hairline : Wedge.gap, endGap = s.joinsNext ? Wedge.hairline : Wedge.gap
         let shape = Wedge(start: start, end: end, inner: s.inner, outer: outer, startGap: startGap, endGap: endGap)
         let rim = Wedge(start: start, end: end, inner: outer - 7, outer: outer, startGap: startGap, endGap: endGap)
@@ -1302,6 +1323,8 @@ struct RingView: View {
         let arcWidth = CGFloat(end - start) * radius
         return ZStack {
             shape.fill(fill).opacity(urgent ? 1 : 0.95)
+            // Its project's color, under everything else, so that a project can be found without reading.
+            if !urgent, let p = s.project { shape.fill(Palette.projects[p % Palette.projects.count]).opacity(on ? 0.34 : 0.14 + 0.10 * fresh) }
             if !urgent {
                 rim.fill(tint).opacity(a.status == "working" ? 0.55 + 0.45 * pulse : 0.9)
             }
@@ -1325,7 +1348,9 @@ struct RingView: View {
                     .offset(x: CGFloat(cos(s.mid)) * (outer - 19), y: CGFloat(sin(s.mid)) * (outer - 19))
             }
         }
-        .shadow(color: urgent ? Palette.accent.opacity(0.45 + 0.4 * pulse) : .black.opacity(0.35), radius: urgent ? 16 : 6)
+        // An agent that has finished and not been looked at glows, as one that is asking does.
+        .shadow(color: urgent ? Palette.accent.opacity(0.45 + 0.4 * pulse) : (unread ? a.color.opacity(0.75) : .black.opacity(0.35)),
+                radius: urgent ? 16 : (unread ? 15 : 6))
         .offset(x: CGFloat(cos(s.mid)) * pop, y: CGFloat(sin(s.mid)) * pop)
     }
 
@@ -1352,7 +1377,11 @@ struct RingView: View {
                 }
             name(s.name).font(.system(size: family ? (urgent ? 13.5 : 12.5) : (urgent ? 15.5 : 14), weight: .bold, design: .rounded))
             if s.sibling, !brief, !a.title.isEmpty {
-                Text(a.title).font(.system(size: 11, weight: .semibold, design: .rounded)).lineLimit(1).opacity(0.92)
+                // What the session is about, when there is room for all of it.
+                ViewThatFits(in: .horizontal) {
+                    Text(a.title).font(.system(size: 11, weight: .semibold, design: .rounded)).fixedSize().opacity(0.92)
+                    Color.clear.frame(width: 0, height: 0)
+                }
             }
             if !detail.isEmpty {
                 // When both don't fit, the tab goes and the state or time stays.
@@ -1785,6 +1814,8 @@ final class AgentRing {
         model.bubble = nil
         model.active = true
         model.forgetCentre()
+        model.unfolded = false
+        foldSince = nil
         model.confirmed = false     // what is shown at first is what was last seen; `update` brings the present
         shown = agents
         model.layout(agents)
@@ -1843,11 +1874,26 @@ final class AgentRing {
     }
 
     /// A right-click: pin or unpin the wedge being aimed at and stay open. Anywhere else it is an ordinary click.
+    private var foldSince: Date?           // when the pointer came to rest on the idle agents' wedge
+    /// How long the pointer rests on the idle agents' wedge before they are shown.
+    static let unfoldAfter: TimeInterval = 0.45
+
+    /// Give each idle agent its own wedge, for as long as the wheel stays open.
+    func unfold() {
+        guard !model.unfolded else { return }
+        model.unfolded = true
+        foldSince = nil
+        model.highlighted = nil
+        model.layout(shown)
+        placeBubble()
+    }
+
     func pinAimed() {
         if model.leaving { return }
         // On the hub a right-click puts the wheel away, the other half of a left-click opening its agent.
         if model.onHub { leave(); return }
-        guard model.notice == nil, pointerOnWheel, let picked = model.slices.first(where: { $0.id == model.highlighted })?.agent else {
+        guard model.notice == nil, pointerOnWheel, model.highlighted != RingModel.foldID,
+              let picked = model.slices.first(where: { $0.id == model.highlighted })?.agent else {
             choose()
             return
         }
@@ -1983,6 +2029,12 @@ final class AgentRing {
         // so travelling out to the bubble keeps that agent selected.
         guard r <= model.outerRadius + 22, !overBubble || r <= model.outerRadius else { return }
         let aim = model.aim(at: rel)
+        // Resting on the idle agents' wedge shows them.
+        if aim == RingModel.foldID {
+            if let since = foldSince { if Date().timeIntervalSince(since) >= Self.unfoldAfter { unfold(); return } } else { foldSince = Date() }
+        } else {
+            foldSince = nil
+        }
         if aim != model.highlighted {
             model.highlighted = aim
             showAnswer(for: aim)
@@ -2054,6 +2106,8 @@ final class AgentRing {
         // A notice has nothing to pick: any click or tap just closes it.
         if model.notice != nil { close(); return }
         let picked = model.slices.first { $0.id == model.highlighted }?.agent
+        // The wedge that stands for the idle agents opens them up; the wheel stays.
+        if picked?.id == RingModel.foldID, pointerOnWheel || fromTrigger { unfold(); return }
         // On a wedge, or on the hub that stands for one.
         let onAgent = pointerOnWheel || (model.onHub && !fromTrigger)
         // On an answer button: send that answer and stay open for the next question.

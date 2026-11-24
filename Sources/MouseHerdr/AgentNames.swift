@@ -16,6 +16,33 @@ enum AgentNames {
         return name.replacingOccurrences(of: "-", with: " ").replacingOccurrences(of: "_", with: " ")
     }
 
+    /// The part of a space's name before its colon: "Shop: cart page" belongs to "Shop".
+    static func prefix(of space: String) -> String? {
+        guard let colon = space.range(of: ": ") else { return nil }
+        let p = space[..<colon.lowerBound].trimmingCharacters(in: .whitespaces)
+        return p.isEmpty ? nil : p
+    }
+
+    /// At most this many projects get a color of their own.
+    static let colors = 3
+
+    /// The project each space belongs to, as a number from 0: the largest project is 0. A prefix
+    /// that only extends another ("Shop runner" beside "Shop") joins it. A project needs two
+    /// agents, and only the largest few count; a space in none of them is not in the result.
+    /// `spaces` has one entry per agent.
+    static func projects(for spaces: [String]) -> [String: Int] {
+        var raw: [String: String] = [:]
+        for s in Set(spaces) { raw[s] = prefix(of: s) }
+        let prefixes = Set(raw.values)
+        func root(_ p: String) -> String { prefixes.filter { p.hasPrefix($0 + " ") }.min { $0.count < $1.count } ?? p }
+        var count: [String: Int] = [:]
+        for s in spaces { if let p = raw[s] { count[root(p), default: 0] += 1 } }
+        let own = count.filter { $0.value >= 2 }.sorted { ($1.value, $0.key) < ($0.value, $1.key) }.prefix(colors).map(\.key)
+        var out: [String: Int] = [:]
+        for s in Set(spaces) { if let p = raw[s].map(root), let i = own.firstIndex(of: p) { out[s] = i } }
+        return out
+    }
+
     private static let filler: Set<String> = ["the", "a", "an", "and", "or", "for", "of", "to", "in", "on", "with", "then", "from", "by", "at", "as", "is"]
     /// A name longer than this keeps only its first word.
     static let longest = 18
