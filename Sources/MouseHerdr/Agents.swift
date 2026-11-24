@@ -196,6 +196,20 @@ struct AgentInfo: Identifiable, Equatable {
 
 /// Whether herdr-core, the thing that knows about the agents, can be reached.
 /// Herdr is optional, so every state here is a normal one to be in.
+/// Which agent is in front in the Herdr app, and which was in front before it: the one to go back to.
+struct FrontHistory {
+    private(set) var front: String?
+    private(set) var back: String?
+
+    /// This agent is in front now. The one that was becomes the one to go back to. Hearing the
+    /// same one again, or that it is not known, changes nothing.
+    mutating func note(_ id: String?) {
+        guard let id, id != front else { return }
+        if let was = front { back = was }
+        front = id
+    }
+}
+
 enum HerdrStatus: Equatable {
     case unknown                // not asked yet
     case notInstalled           // no `hc` command on this Mac
@@ -457,6 +471,23 @@ final class AgentWatcher {
     /// Whether the agent has a tab in the Herdr app, from its `hc get` answer.
     static func inApp(_ obj: [String: Any]) -> Bool {
         (obj["labels"] as? [String: Any])?["herdr.tab"] != nil
+    }
+
+    /// The terminal that is in front in the Herdr app, from `herdr-app ls`: the first terminal of
+    /// the active tab of the active space. One on another machine is named "machine/t7", as `hc` names it.
+    static func frontTerminal(in listing: Data) -> String? {
+        guard let root = try? JSONSerialization.jsonObject(with: listing) as? [String: Any],
+              let spaces = root["spaces"] as? [[String: Any]],
+              let space = spaces.first(where: { $0["active"] as? Bool == true }),
+              let tab = (space["tabs"] as? [[String: Any]])?.first(where: { $0["active"] as? Bool == true }),
+              let terminal = (tab["terminals"] as? [[String: Any]])?.first?["terminal"] as? String else { return nil }
+        if let machine = space["machine"] as? String, !machine.isEmpty { return "\(machine)/\(terminal)" }
+        return terminal
+    }
+
+    /// Ask the Herdr app which terminal is in front. Quick, and given up on quickly.
+    static func frontTerminal() -> String? {
+        tool("herdr-app").flatMap { run($0, ["ls"], timeout: 0.2) }.flatMap(frontTerminal(in:))
     }
 
     /// How many sub-agents the agent runs inside itself are busy, from its `hc get` answer.
@@ -856,6 +887,11 @@ final class RingModel: ObservableObject {
     /// The idle agents each have a wedge. Until then they share one, so that the agents with
     /// something going on have the wheel to themselves.
     @Published var unfolded = false
+    /// The agent the person was on before the one they are on now, if that is known. With
+    /// nobody waiting, the middle of the wheel stands for it: a click there goes back.
+    var back: String?
+    /// The middle stands for the agent to go back to, and not for one that is asking.
+    @Published var centreIsBack = false
     /// Say in the middle what a click does. True for the first few openings.
     @Published var hints = false
     /// The id of the wedge that stands for the idle agents.
@@ -992,14 +1028,14 @@ final class RingModel: ObservableObject {
         // Without herdr-core there is nothing true to show, so don't leave old wedges up.
         let agents = (herdr == .notInstalled || herdr == .notRunning) ? [] : agents
         // Every agent gets a wedge, except that the idle ones share one until they are asked for.
-        let idle = unfolded ? [] : agents.filter { $0.status == "idle" && !pinned.contains($0.id) }
+        let idle = unfolded ? [] : agents.filter { $0.status == "idle" && !pinned.contains($0.id) && $0.id != back }
         // A wheel of nothing but idle agents shows them all: there is no one to make room for.
         let folding = idle.count >= Self.foldFrom && idle.count < agents.count
         let apart = folding ? agents.filter { a in !idle.contains { $0.id == a.id } } : agents
         var all = Self.arrange(apart, order: order, pinned: pinned)
         if folding { all.append(AgentInfo(id: Self.foldID, agent: "", status: "idle", space: "\(idle.count) idle", tab: "")) }
         outerRadius = all.count > 9 ? 300 : (all.count > 6 ? 275 : 250)
-        guard !all.isEmpty else { slices = []; bands = []; highlighted = nil; centre = nil; return }
+        guard !all.isEmpty else { slices = []; bands = []; highlighted = nil; centre = nil; centreIsBack = false; return }
 
         // The hub keeps its agent for as long as the wheel is open, so that a question being read
         // there is not swapped for a newer one. It moves on when that agent has gone, or when it
@@ -1007,10 +1043,13 @@ final class RingModel: ObservableObject {
         if let held = all.first(where: { $0.id == centre }), held.needsYou == centreWaiting {
             // still the one
         } else {
-            let pick = Self.centreAgent(all.filter { $0.id != Self.foldID })
+            let pick = Self.centreAgent(all.filter { $0.id != Self.foldID }, back: back)
             centre = pick?.id
             centreWaiting = pick?.needsYou ?? false
         }
+
+        let goesBack = centre != nil && !centreWaiting
+        if goesBack != centreIsBack { centreIsBack = goesBack }
 
         // Agents waiting on you get wider wedges that also reach further in, so they are the closest
         // targets. Busy ones are all one size. A quiet one starts at that size and slowly gets thinner
@@ -1116,11 +1155,12 @@ final class RingModel: ObservableObject {
     /// The hub's radius. Nothing inside it is on a wedge.
     static let hubRadius: CGFloat = 46
 
-    /// The agent the hub stands for among these: whoever most recently started waiting on you,
-    /// or else whoever is busy or was active last. This is the wheel's "most recent" order, leaving
-    /// pins out of it: a pin keeps an agent near the front, it does not make it the latest.
-    static func centreAgent(_ agents: [AgentInfo]) -> AgentInfo? {
-        arrange(agents, order: .recent).first
+    /// The agent the hub stands for among these: whoever most recently started waiting on you.
+    /// With nobody waiting it is `back`, the agent the person was on before this one, so that a
+    /// click in the middle goes back to it. With neither, the middle stands for no one.
+    static func centreAgent(_ agents: [AgentInfo], back: String? = nil) -> AgentInfo? {
+        if let asking = arrange(agents, order: .recent).first, asking.needsYou { return asking }
+        return agents.first { $0.id == back }
     }
 
     /// Whether a point, as an offset from the centre, is on the hub.
@@ -1530,7 +1570,15 @@ struct RingView: View {
                 Text(model.looking ? "Looking for" : "No agents").font(.system(size: 13, weight: .semibold))
                 Text(model.looking ? "agents…" : "running").font(.system(size: 11)).opacity(0.7)
             } else if let focus, let pointed {
-                // The agent being pointed at: its name, and what it is doing.
+                // The agent being pointed at: its name, and what it is doing. In the middle with
+                // nobody waiting, that is the agent a click goes back to.
+                if model.onHub, model.centreIsBack {
+                    HStack(spacing: 3) {
+                        Image(systemName: "arrow.uturn.backward").font(.system(size: 8.5, weight: .bold))
+                        Text("back to").font(.system(size: 9.5, weight: .semibold))
+                    }
+                    .opacity(0.7)
+                }
                 name(pointed.name).font(.system(size: 13, weight: .bold, design: .rounded)).frame(width: RingModel.hubRadius * 2 - 14)
                 Text(pointed.folded > 0 ? "idle" : (pointed.ago ?? pointed.busyFor.map { "working \($0)" } ?? focus.statusWord))
                     .font(.system(size: 10.5, weight: .semibold)).foregroundStyle(focus.needsYou ? Palette.accent : focus.color)

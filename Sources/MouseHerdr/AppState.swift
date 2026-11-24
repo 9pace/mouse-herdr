@@ -237,6 +237,9 @@ final class AppState: ObservableObject {
     let feeler = HoverFeeler()
     let agents = AgentWatcher()
     let ring = AgentRing()
+    /// The agent in front in the Herdr app, and the one that was in front before it. Kept up by
+    /// looking now and then, and whenever the wheel switches agents.
+    private var fronts = FrontHistory()
     let replyBox = ReplyBox()
     private var agentStatus: [String: String] = [:]
     private var agentsSeen = false
@@ -555,7 +558,10 @@ final class AppState: ObservableObject {
             return true
         }
         ring.onAim = { [weak self] in self?.buzz(.tick) }
-        ring.onChoose = { [weak self] agent in self?.agents.focus(agent) }
+        ring.onChoose = { [weak self] agent in
+            self?.fronts.note(agent.id)
+            self?.agents.focus(agent)
+        }
         ring.onPin = { [weak self] agent in
             self?.togglePin(agent)
             self?.buzz(.tick)
@@ -689,6 +695,11 @@ final class AppState: ObservableObject {
         // One question at a time, so a herdr-core that is slow to answer can't build up a queue.
         guard !agentsFetching else { return }
         agentsFetching = true
+        // Which agent is in front, so that the wheel knows which one to go back to.
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let front = AgentWatcher.frontTerminal()
+            DispatchQueue.main.async { self?.fronts.note(front) }
+        }
         // What a waiting agent is asking is read too, so that the wheel has its question to hand
         // the moment it opens.
         agents.fetch(details: .waiting) { [weak self] list in
@@ -772,6 +783,9 @@ final class AppState: ObservableObject {
     private func openRing() {
         ring.model.order = ringOrder
         ring.model.pinned = pinnedAgents
+        // Which agent is in front may have changed in Herdr itself since the last look.
+        fronts.note(AgentWatcher.frontTerminal())
+        ring.model.back = fronts.back
         ring.show(agents.latest, herdr: agents.status, appInstalled: agents.appInstalled)
         refreshRing()
         // Keep the wheel live while it is showing: agents change state, ask new questions, finish.

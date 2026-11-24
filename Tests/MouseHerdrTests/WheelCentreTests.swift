@@ -12,8 +12,9 @@ final class WheelCentreTests: XCTestCase {
         return a
     }
 
-    private func wheel(_ agents: [AgentInfo], pinned: Set<String> = [], order: RingOrder = .recent) -> RingModel {
+    private func wheel(_ agents: [AgentInfo], pinned: Set<String> = [], order: RingOrder = .recent, back: String? = nil) -> RingModel {
         let model = RingModel()
+        model.back = back
         model.herdr = .running(agents: agents.count)
         model.pinned = pinned
         model.order = order
@@ -33,21 +34,33 @@ final class WheelCentreTests: XCTestCase {
         XCTAssertEqual(wheel([agent("busy", "working", quiet: 1), agent("failed", "error", quiet: 50)]).centre, "failed")
     }
 
-    func testWithNobodyWaitingTheHubStandsForTheLatestAgent() {
-        // Busy ones are the latest; among them, the one whose turn started last.
-        XCTAssertEqual(wheel([
-            agent("longTurn", "working", quiet: 40), agent("newTurn", "working", quiet: 1), agent("finished", "done", quiet: 0.1),
-        ]).centre, "newTurn")
-        // With nobody busy, the one that went quiet last.
-        XCTAssertEqual(wheel([agent("yesterday", "done", quiet: 1500), agent("justNow", "idle", quiet: 3)]).centre, "justNow")
-        XCTAssertEqual(wheel([agent("only", "idle")]).centre, "only")
+    func testWithNobodyWaitingTheHubStandsForTheAgentToGoBackTo() {
+        let agents = [agent("longTurn", "working", quiet: 40), agent("newTurn", "working", quiet: 1), agent("finished", "done", quiet: 0.1)]
+        let model = wheel(agents, back: "longTurn")
+        XCTAssertEqual(model.centre, "longTurn")
+        XCTAssertTrue(model.centreIsBack)
+        // Without one to go back to, or with one that has gone, the middle stands for no one.
+        XCTAssertNil(wheel(agents).centre)
+        XCTAssertNil(wheel(agents, back: "closed").centre)
+        XCTAssertFalse(wheel(agents).centreIsBack)
+        // Someone asking comes first.
+        let asked = wheel(agents + [agent("asking", "blocked", quiet: 5)], back: "longTurn")
+        XCTAssertEqual(asked.centre, "asking")
+        XCTAssertFalse(asked.centreIsBack)
     }
 
-    func testAPinDoesNotMakeAnAgentTheLatest() {
-        let agents = [agent("pinnedOld", "done", quiet: 600), agent("latest", "working", quiet: 1)]
-        XCTAssertEqual(wheel(agents, pinned: ["pinnedOld"]).centre, "latest")
-        // Nor does the order the wheel is drawn in.
-        XCTAssertEqual(wheel(agents, pinned: ["pinnedOld"], order: .space).centre, "latest")
+    func testNeitherAPinNorTheOrderChangesWhoTheHubStandsFor() {
+        let agents = [agent("pinnedOld", "done", quiet: 600), agent("latest", "working", quiet: 1), agent("before", "working", quiet: 9)]
+        XCTAssertEqual(wheel(agents, pinned: ["pinnedOld"], back: "before").centre, "before")
+        XCTAssertEqual(wheel(agents, pinned: ["pinnedOld"], order: .space, back: "before").centre, "before")
+    }
+
+    func testTheAgentToGoBackToKeepsAWedgeEvenWhenItIsIdle() {
+        let agents = [agent("busy", "working", quiet: 1), agent("idleA", "idle", quiet: 9), agent("idleB", "idle", quiet: 9), agent("before", "idle", quiet: 3)]
+        let model = wheel(agents, back: "before")
+        XCTAssertEqual(model.centre, "before")
+        XCTAssertTrue(model.slices.contains { $0.id == "before" })
+        XCTAssertEqual(model.slices.first { $0.id == RingModel.foldID }?.folded, 2)
     }
 
     func testAWheelWithNoAgentsHasNothingInTheMiddle() {
@@ -71,13 +84,14 @@ final class WheelCentreTests: XCTestCase {
         model.layout([agent("first", "working", quiet: 0), agent("busy", "working", quiet: 1), second], now: now)
         XCTAssertEqual(model.centre, "second")
 
-        // That agent goes away altogether: the hub falls back to the latest.
+        // That agent goes away altogether: the hub falls back to the agent to go back to.
+        model.back = "busy"
         model.layout([agent("first", "working", quiet: 0), agent("busy", "working", quiet: 1)], now: now)
-        XCTAssertEqual(model.centre, "first")
+        XCTAssertEqual(model.centre, "busy")
     }
 
     func testAnAgentThatStartsAskingWhileItHasTheHubIsLookedAtAgain() {
-        let model = wheel([agent("latest", "working", quiet: 1), agent("older", "done", quiet: 9)])
+        let model = wheel([agent("latest", "working", quiet: 1), agent("older", "done", quiet: 9)], back: "latest")
         XCTAssertEqual(model.centre, "latest")
         // Somebody else starts waiting: with nobody waiting before, the hub's agent keeps the hub.
         model.layout([agent("latest", "working", quiet: 1), agent("older", "blocked", quiet: 0)], now: now)
@@ -86,6 +100,34 @@ final class WheelCentreTests: XCTestCase {
         model.forgetCentre()
         model.layout([agent("latest", "working", quiet: 1), agent("older", "blocked", quiet: 0)], now: now)
         XCTAssertEqual(model.centre, "older")
+    }
+
+    func testTheFrontTerminalIsTheActiveTabOfTheActiveSpace() {
+        let listing = """
+        {"spaces":[
+          {"machine":null,"active":false,"tabs":[{"active":true,"terminals":[{"terminal":"t1"}]}]},
+          {"machine":null,"active":true,"tabs":[{"active":false,"terminals":[{"terminal":"t2"}]},{"active":true,"terminals":[{"terminal":"t3"},{"terminal":"t4"}]}]}
+        ]}
+        """
+        XCTAssertEqual(AgentWatcher.frontTerminal(in: Data(listing.utf8)), "t3")
+        let remote = #"{"spaces":[{"machine":"devdesk","active":true,"tabs":[{"active":true,"terminals":[{"terminal":"t7"}]}]}]}"#
+        XCTAssertEqual(AgentWatcher.frontTerminal(in: Data(remote.utf8)), "devdesk/t7")
+        XCTAssertNil(AgentWatcher.frontTerminal(in: Data("{}".utf8)))
+    }
+
+    func testTheAgentInFrontBecomesTheOneToGoBackToWhenAnotherTakesItsPlace() {
+        var fronts = FrontHistory()
+        fronts.note("t1")
+        XCTAssertNil(fronts.back)
+        fronts.note("t2")
+        XCTAssertEqual(fronts.back, "t1")
+        // Hearing the same one again, or nothing, changes nothing.
+        fronts.note("t2")
+        fronts.note(nil)
+        XCTAssertEqual(fronts.front, "t2")
+        XCTAssertEqual(fronts.back, "t1")
+        fronts.note("t1")
+        XCTAssertEqual(fronts.back, "t2")
     }
 
     // MARK: Aiming
