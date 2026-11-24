@@ -255,6 +255,19 @@ final class WheelCardsTests: XCTestCase {
         }
     }
 
+    func testAWedgesCornersAreRoundAndAThinWedgeIsStillThere() {
+        let up = -Double.pi / 2
+        let wide = Wedge(start: up - 0.5, end: up + 0.5, inner: 96, outer: 250).path(in: canvas)
+        // Just inside where the sharp corner at the rim was: cut off by the round.
+        let angle = up - 0.5 + Double(Wedge.gap / 250) + 0.004
+        let corner = CGPoint(x: canvas.midX + CGFloat(cos(angle)) * 249, y: canvas.midY + CGFloat(sin(angle)) * 249)
+        XCTAssertFalse(wide.contains(corner))
+        XCTAssertTrue(wide.contains(CGPoint(x: canvas.midX, y: canvas.midY - 170)))
+        // Too thin for any round: still a wedge.
+        let thin = Wedge(start: up - 0.03, end: up + 0.03, inner: 96, outer: 250).path(in: canvas)
+        XCTAssertTrue(thin.contains(CGPoint(x: canvas.midX, y: canvas.midY - 200)))
+    }
+
     func testAWideWedgeKeepsItsWordsWhereTheyWere() {
         // Room for the widest label at the usual place: nothing moves.
         let up = -Double.pi / 2
