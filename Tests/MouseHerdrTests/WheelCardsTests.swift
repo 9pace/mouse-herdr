@@ -159,12 +159,19 @@ final class WheelCardsTests: XCTestCase {
         return host
     }
 
+    /// Before macOS 26 the glass is a view that blurs what is behind the window. From 26 on it is
+    /// the system's own glass, which has no view of its own to look at.
+    private func blurView(in view: NSView) throws -> NSVisualEffectView {
+        if #available(macOS 26.0, *) { throw XCTSkip("the system's own glass is used here") }
+        return try XCTUnwrap(descendants(of: view, NSVisualEffectView.self).first)
+    }
+
     func testOnTheScreenACardShowsWhatIsBehindTheWindowBlurredInItsOwnShape() throws {
-        let blur = try XCTUnwrap(descendants(of: card(live: true), NSVisualEffectView.self).first)
+        let blur = try blurView(in: card(live: true))
         XCTAssertEqual(blur.blendingMode, .behindWindow)
         // The wheel's window is never the active one; glass that waited for that would stay flat.
         XCTAssertEqual(blur.state, .active)
-        // Cut to the card's outline, with room round it for a bubble's tail.
+        // Cut to the card's outline, with room round it for a bubble's arrow.
         let mask = try XCTUnwrap(blur.maskImage)
         XCTAssertEqual(mask.size, CGSize(width: 400 + 2 * WheelGlass.bleed, height: 300 + 2 * WheelGlass.bleed))
     }
@@ -172,7 +179,7 @@ final class WheelCardsTests: XCTestCase {
     func testTheBlurIsNeverFaded() throws {
         // A blurring view that is less than fully opaque, or sits in one that is, blurs nothing:
         // what is behind the glass shows through it sharp.
-        var view: NSView? = try XCTUnwrap(descendants(of: card(live: true), NSVisualEffectView.self).first)
+        var view: NSView? = try blurView(in: card(live: true))
         while let v = view {
             XCTAssertEqual(v.alphaValue, 1, "\(type(of: v))")
             XCTAssertEqual(v.layer?.opacity ?? 1, 1, "\(type(of: v))")
@@ -180,28 +187,80 @@ final class WheelCardsTests: XCTestCase {
         }
     }
 
-    func testOnTheScreenEveryWedgeAndTheHubAreGlassCutToTheirOwnShape() throws {
-        let model = RingModel()
-        model.herdr = .running(agents: 3)
-        model.layout([agent("t1", "working"), agent("t2", "done"), agent("t3", "blocked")])
-        model.glass = true
-        let host = NSHostingView(rootView: RingView(model: model))
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: RingView.side, height: RingView.side),
-                              styleMask: [.borderless], backing: .buffered, defer: true)
-        window.isReleasedWhenClosed = false
-        window.contentView = host
-        host.layoutSubtreeIfNeeded()
-        addTeardownBlock { window.close() }
+    // MARK: The wedge that is pointed at
 
-        let panes = descendants(of: host, NSVisualEffectView.self)
-        XCTAssertEqual(panes.count, model.slices.count + 1)
-        for pane in panes {
-            // Its own size and not the wheel's: a wedge is drawn on the whole wheel, and glass
-            // that large for each would be a dozen blurs of everything behind the wheel.
-            let mask = try XCTUnwrap(pane.maskImage)
-            XCTAssertLessThan(mask.size.width, RingView.side / 2)
-            XCTAssertLessThan(mask.size.height, RingView.side / 2)
+    private let canvas = CGRect(x: 0, y: 0, width: RingView.side, height: RingView.side)
+
+    /// A wheel with quiet agents on it, which rest thin and short and grow the most when pointed at.
+    private func crowded() -> RingModel {
+        let model = RingModel()
+        let now = Date()
+        var agents = (0..<4).map { agent("w\($0)", "working") }
+        agents += (0..<6).map { i -> AgentInfo in
+            var a = agent("d\(i)", "done")
+            a.lastActive = now.addingTimeInterval(-Double(i + 1) * 86_400)
+            return a
         }
+        model.herdr = .running(agents: agents.count)
+        model.layout(agents, now: now)
+        return model
+    }
+
+    func testAWedgeEndsWhereTheOneThatIsPointedAtLiesOverIt() throws {
+        // Glass is see-through. A neighbour left whole under the wedge that has grown would
+        // show through it, edges and words and all.
+        let model = crowded()
+        for pointed in model.slices {
+            let cover = try XCTUnwrap(RingView.cover(pointed))
+            for other in model.slices where other.id != pointed.id {
+                let wedge = Wedge(start: other.start, end: other.end, inner: other.inner, outer: other.outer)
+                let left = Cut(wedge: wedge, away: cover).path(in: canvas)
+                // No spot on the ground the grown wedge covers is still part of the other.
+                let box = cover.boundingRect
+                for x in stride(from: box.minX, through: box.maxX, by: 5) {
+                    for y in stride(from: box.minY, through: box.maxY, by: 5) where cover.contains(CGPoint(x: x, y: y)) {
+                        XCTAssertFalse(left.contains(CGPoint(x: x, y: y)), "\(other.id) under \(pointed.id) at \(x), \(y)")
+                    }
+                }
+            }
+        }
+    }
+
+    func testAWedgeNobodyLiesOverIsWhole() {
+        let model = crowded()
+        let s = model.slices[0]
+        let wedge = Wedge(start: s.start, end: s.end, inner: s.inner, outer: s.outer)
+        XCTAssertEqual(Cut(wedge: wedge, away: nil).path(in: canvas).boundingRect, wedge.path(in: canvas).boundingRect)
+    }
+
+    func testAWedgesWordsAreGivenABoxThatIsInsideTheWedge() {
+        // The label is an upright box. Sized by the wedge's width alone, its corners crossed
+        // the edges of a short wedge that points to a corner of the screen.
+        let model = crowded()
+        for s in model.slices {
+            for pointed in [false, true] {
+                let start = s.start - (pointed ? s.widen : 0), end = s.end + (pointed ? s.widen : 0)
+                let outer = pointed ? s.reach : s.outer
+                let near = s.inner + (outer - s.inner) * 0.54
+                let room = Wedge.room(start: start, end: end, inner: s.inner, outer: outer, height: 60, most: 150, near: near)
+                guard room.width > 0 else { continue }
+                let wedge = Wedge(start: start, end: end, inner: s.inner, outer: outer).path(in: canvas)
+                let c = CGPoint(x: canvas.midX + CGFloat(cos(s.mid)) * room.radius, y: canvas.midY + CGFloat(sin(s.mid)) * room.radius)
+                for dx in [-room.width / 2, room.width / 2] {
+                    for dy in [-30.0, 30.0] {
+                        XCTAssertTrue(wedge.contains(CGPoint(x: c.x + dx, y: c.y + dy)), "\(s.id) pointed \(pointed)")
+                    }
+                }
+            }
+        }
+    }
+
+    func testAWideWedgeKeepsItsWordsWhereTheyWere() {
+        // Room for the widest label at the usual place: nothing moves.
+        let up = -Double.pi / 2
+        let room = Wedge.room(start: up - 0.6, end: up + 0.6, inner: 96, outer: 250, height: 60, most: 150, near: 180)
+        XCTAssertEqual(room.radius, 180)
+        XCTAssertEqual(room.width, 150)
     }
 
     func testOffTheScreenTheCardsAreNotGlass() {
