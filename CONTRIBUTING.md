@@ -124,7 +124,21 @@ dist/MouseHerdr.app/Contents/MacOS/MouseHerdr --snapshot-ring /tmp/mouseherdr-ag
 dist/MouseHerdr.app/Contents/MacOS/MouseHerdr --snapshot-ring /tmp/mouseherdr-wheel-opening.png --hub
 dist/MouseHerdr.app/Contents/MacOS/MouseHerdr --snapshot-ring /tmp/mouseherdr-no-herdr.png --state not-installed --no-app
 dist/MouseHerdr.app/Contents/MacOS/MouseHerdr --snapshot-ring /tmp/mouseherdr-by-space.png --order space
+dist/MouseHerdr.app/Contents/MacOS/MouseHerdr --snapshot-ring /tmp/mouseherdr-caption.png --highlight 3
+dist/MouseHerdr.app/Contents/MacOS/MouseHerdr --snapshot-ring /tmp/mouseherdr-top-of-screen.png --hub --headroom 640
 ```
+
+A picture cannot show the glass of the wheel's cards, because nothing is behind it to show
+through: there they are drawn as a see-through dark instead. To see the glass, and how the
+wheel follows the pointer, put the wheel itself on the screen with the same sample agents:
+
+```bash
+dist/MouseHerdr.app/Contents/MacOS/MouseHerdr --preview-ring
+```
+
+It takes no button of the mouse and sends no answer, so it can be up while your installed
+copy runs. It quits when the wheel closes: click away from it, or move the pointer well
+off it.
 
 Avoid `--live` for public screenshots unless you have reviewed all visible session data.
 Review window snapshots too: they can use your saved button assignments and app paths. To

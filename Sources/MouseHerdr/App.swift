@@ -33,6 +33,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var updateMenuItem: NSMenuItem?
     private var updateWatch: AnyCancellable?
     private var whatsNewWindow: NSWindow?
+    /// The wheel that "--preview-ring" put on the screen.
+    private var previewRing: AgentRing?
 
     func applicationDidFinishLaunching(_ note: Notification) {
         let args = CommandLine.arguments
@@ -136,8 +138,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             forced = s
         }
 
-        // Developer aid: draw the agent ring to a PNG with sample or live agents.
-        if let i = args.firstIndex(of: "--snapshot-ring"), i + 1 < args.count {
+        // Developer aid: draw the agent ring to a PNG with sample or live agents. "--preview-ring"
+        // puts the wheel itself on the screen with them instead, for what a picture cannot show:
+        // the glass of its cards, and how it follows the pointer. It takes no button of the mouse
+        // and sends no answer, so it can be up while the installed copy runs, and it quits when
+        // the wheel closes.
+        let ringShot = args.firstIndex(of: "--snapshot-ring").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
+        let preview = args.contains("--preview-ring")
+        if ringShot != nil || preview {
             let model = RingModel()
             model.canJump = !args.contains("--no-app")
             // A picture shows the wheel as it is once it has looked; "--unchecked" shows the moment before.
@@ -230,7 +238,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
             }
             if forced == nil { model.herdr = .running(agents: list.count) }
+            if preview {
+                let ring = AgentRing()
+                ring.model.order = model.order
+                ring.model.pinned = model.pinned
+                ring.onOpenChange = { open in if !open { NSApp.terminate(nil) } }
+                // An answer that is picked goes nowhere, and is shown as one that went in.
+                ring.onAnswer = { [weak ring] agent, option in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { ring?.answered(agent, option: option, .delivered(late: false)) }
+                }
+                previewRing = ring
+                ring.show(list, herdr: model.herdr, appInstalled: model.canJump)
+                ring.update(list, herdr: model.herdr, appInstalled: model.canJump)   // looked at, so an answer can be picked
+                DispatchQueue.main.asyncAfter(deadline: .now() + 120) { NSApp.terminate(nil) }
+                return
+            }
             model.layout(list)
+            model.captionAbove = args.contains("--caption-above")
             model.highlighted = model.slices.first?.id
             if args.contains("--clicked"), !model.canJump {
                 // What a click on a wedge leaves behind when the Herdr app is missing.
@@ -253,13 +277,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     : pick == "none" ? nil : model.slices.dropFirst(Int(pick ?? "0") ?? 0).first
                 model.onHub = onHub && slice != nil
                 model.highlighted = slice?.id
-                if let s = slice, !args.contains("--no-bubble") {
+                // Only an agent that is asking has a bubble; any other has its caption under the wheel.
+                if let s = slice, s.agent.needsYou, !args.contains("--no-bubble") {
                     let big = args.contains("--expanded")
                     let m = RingModel.bubbleMetrics(for: s.agent, expanded: big)
                     let dx = CGFloat(cos(s.mid)), dy = CGFloat(sin(s.mid))
-                    let reach = s.reach + 54 + abs(dx) * m.size.width / 2 + abs(dy) * m.size.height / 2
-                    model.bubble = RingModel.Bubble(offset: CGSize(width: dx * reach, height: dy * reach), size: m.size,
-                                                    toward: CGSize(width: -dx, height: -dy), textHeight: m.textHeight, optionCount: m.options, expanded: big)
+                    // "--headroom N" draws it as it is where the screen ends N points above the wheel's centre.
+                    let room = value("--headroom").flatMap { Double($0) }.map {
+                        CGRect(x: -RingView.side / 2 + 10, y: -CGFloat($0) + 10, width: RingView.side - 20, height: CGFloat($0) + RingView.side / 2 - 20)
+                    }
+                    let spot = RingModel.bubbleSpot(size: m.size, mid: s.mid, reach: s.reach, clearance: model.bubbleClearance, room: room).spot
+                    let vx = dx * (s.inner + s.outer) / 2 - spot.x, vy = dy * (s.inner + s.outer) / 2 - spot.y
+                    let far = max(1, hypot(vx, vy))
+                    model.bubble = RingModel.Bubble(offset: CGSize(width: spot.x, height: spot.y), size: m.size,
+                                                    toward: CGSize(width: vx / far, height: vy / far), textHeight: m.textHeight, optionCount: m.options, expanded: big)
                     let hover = value("--hover")
                     model.hoveredOption = hover == "none" ? nil : (hover.flatMap { Int($0) } ?? (m.options > 1 ? 1 : nil))
                     // "--sent N" shows an answer that has gone in; "--sending N" one still on its way
@@ -298,7 +329,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let r = ImageRenderer(content: view)
             r.scale = 1.5
             if let cg = r.cgImage {
-                try? NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: args[i + 1]))
+                try? NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: ringShot ?? ""))
             }
             NSApp.terminate(nil)
             return

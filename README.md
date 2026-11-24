@@ -73,9 +73,14 @@ Click the GIF to watch **MouseHerdr: Welcome to My Herd** on YouTube
 - When a Herdr space has several sessions, each wedge also says what its session is about.
   The Agents page can order the wheel by space instead, which keeps every agent in its
   place and puts a space's sessions side by side under its name.
-- If it asked a question, a speech bubble shows it. Each offered choice is a button you can
-  click to answer without leaving what you're doing; hovering a choice shows its
-  explanation, and "Type your own answer…" opens a small text box.
+- Point at an agent that is not asking and the wheel writes underneath which space and
+  tab it is in and what its session is about, in full, where the wedge has room only for
+  a short name.
+- If it asked a question, a speech bubble of dark glass shows it. Each offered choice is a
+  button you can click to answer without leaving what you're doing; hovering a choice shows
+  its explanation, and "Type your own answer…" opens a small text box. The bubble sits just
+  beyond its wedge, or round the wheel from it where the screen ends too soon, and what
+  is behind it shows through, blurred.
 - The choice you clicked is blue while the answer is on its way and turns green once the
   agent has it. herdr-core delivers an answer when that agent's terminal has had about
   3 seconds without typing or pointer movement, so it can take a moment if you were just

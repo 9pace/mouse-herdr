@@ -921,6 +921,83 @@ final class RingModel: ObservableObject {
         var hintOnLeft = false // which side of the bubble has room for a choice's explanation
     }
 
+    /// The wheel is on the screen, so its cards can be glass: what is behind the window shows
+    /// through them, blurred. In a picture or a test there is nothing behind to show.
+    var glass = false
+
+    /// What is written beside the wheel about the agent being pointed at.
+    struct Caption: Equatable {
+        var place: String      // the space it is in, and its tab
+        var detail: String     // what it last said, or what the session is about
+    }
+
+    /// The caption sits above the wheel, because there is no room for it underneath.
+    @Published var captionAbove = false
+    /// How far from the wheel's centre the middle of the caption is.
+    var captionReach: CGFloat { outerRadius + 66 }
+
+    /// An agent that is not asking has nothing to answer, so pointing at it takes no bubble: only
+    /// where it is and what it is about, written under the wheel. The wedge has room for a short
+    /// name, and this is the whole of it.
+    var caption: Caption? {
+        guard notice == nil, !onHub, let s = slices.first(where: { $0.id == highlighted }),
+              s.folded == 0, !s.agent.needsYou else { return nil }
+        let a = s.agent
+        let place = a.tab.isEmpty || a.tab == a.space ? a.space : "\(a.space)  ·  \(a.tab)"
+        let said = a.speech.text
+        let detail = said.isEmpty ? a.title : said
+        if place.isEmpty && detail.isEmpty { return nil }
+        return Caption(place: place, detail: detail == a.space ? "" : detail)
+    }
+
+    /// How far from the wheel's centre a bubble stays that could not go beyond its own wedge:
+    /// clear of a wedge that is pointed at, and of the name of a space over it.
+    var bubbleClearance: CGFloat { outerRadius + 62 }
+
+    /// Where a bubble of this size goes, as an offset from the wheel's centre (y down), and
+    /// whether that is round the wheel from its wedge.
+    ///
+    /// It goes just beyond its wedge. Where the screen ends before it would fit there, it used to
+    /// be pushed back onto the wheel, under the wedge it belongs to, with the last answers
+    /// covered. Now it goes round the wheel to the nearest place that has room for it, and its
+    /// tail still points at its wedge. `room` is the part of the screen it has to stay on, from
+    /// the wheel's centre; nil when that is not known.
+    static func bubbleSpot(size: CGSize, mid: Double, reach: CGFloat, clearance: CGFloat, room: CGRect?)
+        -> (spot: CGPoint, round: Bool) {
+        func support(_ a: Double) -> CGFloat { abs(CGFloat(cos(a))) * size.width / 2 + abs(CGFloat(sin(a))) * size.height / 2 }
+        func at(_ a: Double, _ t: CGFloat) -> CGPoint { CGPoint(x: CGFloat(cos(a)) * t, y: CGFloat(sin(a)) * t) }
+        func kept(_ p: CGPoint) -> CGPoint {
+            guard let room else { return p }
+            var p = p
+            let minX = room.minX + size.width / 2, maxX = room.maxX - size.width / 2
+            let minY = room.minY + size.height / 2, maxY = room.maxY - size.height / 2
+            if minX < maxX { p.x = min(max(p.x, minX), maxX) }
+            if minY < maxY { p.y = min(max(p.y, minY), maxY) }
+            return p
+        }
+        // How far the nearest point of the bubble is from the wheel's centre.
+        func distance(_ p: CGPoint) -> CGFloat {
+            hypot(max(abs(p.x) - size.width / 2, 0), max(abs(p.y) - size.height / 2, 0))
+        }
+        let straight = kept(at(mid, reach + 54 + support(mid)))
+        if distance(straight) >= clearance - 0.5 { return (straight, false) }
+        // Round the wheel a little at a time, to either side, as close to the wheel as it clears.
+        for step in 1...36 {
+            for side in [1.0, -1.0] {
+                let a = mid + side * Double(step) * .pi / 36
+                var near: CGFloat = 0, far = clearance + support(a)
+                for _ in 0..<24 {
+                    let t = (near + far) / 2
+                    if distance(at(a, t)) >= clearance { far = t } else { near = t }
+                }
+                let p = kept(at(a, far))
+                if distance(p) >= clearance - 0.5 { return (p, true) }
+            }
+        }
+        // A screen too small for it anywhere: over the wheel, where it is at least drawn on top.
+        return (straight, false)
+    }
+
     /// Which answer button the pointer is over, and which one was picked.
     @Published var hoveredOption: Int?
     @Published var sentOption: Int?
@@ -1317,16 +1394,50 @@ struct RingView: View {
                     }
                     hub.opacity(fade).zIndex(3)
                 }
+                if model.bubble == nil, let c = model.caption {
+                    caption(c)
+                        .offset(y: model.captionAbove ? -model.captionReach : model.captionReach)
+                        .zIndex(4)
+                        .transition(.opacity)
+                }
                 if let b = model.bubble, let a = model.slices.first(where: { $0.id == model.highlighted })?.agent {
+                    // Over the wheel, wherever it is: a wedge that is pointed at used to lie on top of it.
                     SpeechBubble(agent: a, bubble: b, model: model)
                         .offset(x: b.offset.width, y: b.offset.height)
-                        .transition(.scale(scale: 0.6).combined(with: .opacity))
+                        .zIndex(5)
+                        .transition(.opacity)
                 }
             }
             .frame(width: Self.side, height: Self.side)
         }
         .animation(.spring(response: 0.22, dampingFraction: 0.72), value: model.highlighted)
         .animation(.easeOut(duration: 0.18), value: model.notice)
+    }
+
+    // MARK: Caption
+
+    /// Where the agent being pointed at is and what it is about, in a place that does not move.
+    private func caption(_ c: RingModel.Caption) -> some View {
+        VStack(spacing: 3) {
+            if !c.place.isEmpty {
+                Text(c.place)
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .lineLimit(1).truncationMode(.middle)
+            }
+            if !c.detail.isEmpty {
+                Text(c.detail)
+                    .font(.system(size: 12.5, weight: .medium, design: .rounded))
+                    .lineLimit(2).multilineTextAlignment(.center).opacity(0.84)
+            }
+        }
+        .foregroundStyle(.white)
+        .shadow(color: .black.opacity(0.85), radius: 3, y: 1)
+        .frame(maxWidth: max(420, model.outerRadius * 2 - 20))
+        .fixedSize(horizontal: true, vertical: true)
+        .padding(.horizontal, 60).padding(.vertical, 18)
+        // The wheel's own shade, carried on under the words so that they read on any desktop.
+        .background(Ellipse().fill(EllipticalGradient(colors: [Color.black.opacity(0.36), Color.black.opacity(0.20), .clear],
+                                                      center: .center, startRadiusFraction: 0.05, endRadiusFraction: 0.5)))
     }
 
     // MARK: Notice
@@ -1606,7 +1717,102 @@ struct RingView: View {
     }
 }
 
-/// A cartoon speech bubble with the agent's question in it.
+/// The dark glass the wheel's cards are made of. On the screen, what is behind the window shows
+/// through it, blurred, the way it does through a menu. In a picture or a test there is nothing
+/// behind to blur, and it is the same dark, only see-through.
+struct WheelGlass: View {
+    /// The card's outline, given its frame. It may reach outside the frame by up to `bleed`,
+    /// as a bubble's tail does.
+    let outline: (CGRect) -> Path
+    var live = false
+    /// How far outside its frame the card is still drawn: its tail, and its shadow.
+    static let bleed: CGFloat = 40
+
+    var body: some View {
+        GeometryReader { g in
+            let b = Self.bleed
+            let path = outline(CGRect(origin: .zero, size: g.size))
+            let wide = CGSize(width: g.size.width + 2 * b, height: g.size.height + 2 * b)
+            let moved = path.offsetBy(dx: b, dy: b)
+            // Everything is placed from the card's top-left corner; what reaches outside it starts `bleed` before.
+            ZStack(alignment: .topLeading) {
+                // A shadow round the outside only: under glass it would show through as a stain.
+                moved.fill(Color.black.opacity(0.55))
+                    .frame(width: wide.width, height: wide.height)
+                    .blur(radius: 11).offset(y: 5)
+                    .mask(Self.outside(moved, in: wide).fill(style: FillStyle(eoFill: true)))
+                    .offset(x: -b, y: -b)
+                if live {
+                    BlurBehind(path: moved, size: wide).frame(width: wide.width, height: wide.height)
+                        .opacity(Self.blurStrength)
+                        .offset(x: -b, y: -b)
+                    path.fill(Self.tint)
+                } else {
+                    path.fill(Self.standIn)
+                }
+                // Light catches the top edge of glass and leaves the bottom one.
+                path.stroke(LinearGradient(colors: [Color.white.opacity(0.44), Color.white.opacity(0.13)],
+                                           startPoint: .top, endPoint: .bottom), lineWidth: 1.5)
+            }
+            .frame(width: g.size.width, height: g.size.height, alignment: .topLeading)
+        }
+    }
+
+    /// How much of the card is the blur. The rest lets what is behind through as it is, so the
+    /// glass is see-through even over a dark desktop, where a blur alone looks solid.
+    static let blurStrength = 0.86
+    /// Laid over the blur, so that white words read whatever is behind. The three numbers here
+    /// are the ones to change for glass that is clearer or more solid.
+    static let tint = Color.black.opacity(0.14)
+    /// The glass where nothing can be blurred.
+    static let standIn = Color(white: 0.07).opacity(0.76)
+
+    private static func outside(_ path: Path, in size: CGSize) -> Path {
+        var p = Path(CGRect(origin: .zero, size: size))
+        p.addPath(path)
+        return p
+    }
+
+    /// What is behind the window, blurred, in the shape of the card.
+    private struct BlurBehind: NSViewRepresentable {
+        let path: Path
+        let size: CGSize
+
+        final class Coordinator {
+            var path: Path?
+            var size = CGSize.zero
+        }
+
+        func makeCoordinator() -> Coordinator { Coordinator() }
+
+        func makeNSView(context: Context) -> NSVisualEffectView {
+            let v = NSVisualEffectView()
+            v.material = .hudWindow
+            v.blendingMode = .behindWindow
+            // The wheel's window is never the active one, and the glass must not go flat for that.
+            v.state = .active
+            v.appearance = NSAppearance(named: .vibrantDark)
+            return v
+        }
+
+        func updateNSView(_ v: NSVisualEffectView, context: Context) {
+            let c = context.coordinator
+            guard c.path != path || c.size != size else { return }
+            c.path = path
+            c.size = size
+            let shape = path.cgPath
+            v.maskImage = NSImage(size: size, flipped: true) { _ in
+                guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
+                ctx.addPath(shape)
+                ctx.setFillColor(.black)
+                ctx.fillPath()
+                return true
+            }
+        }
+    }
+}
+
+/// A speech bubble of dark glass with the agent's question in it.
 struct SpeechBubble: View {
     let agent: AgentInfo
     let bubble: RingModel.Bubble
@@ -1633,9 +1839,15 @@ struct SpeechBubble: View {
 
     @ObservedObject var model: RingModel
 
+    /// The bubble and its tail as one outline, so that glass has no seam where they meet.
+    static func outline(_ rect: CGRect, toward: CGSize) -> Path {
+        let box = Path(roundedRect: rect, cornerRadius: 24, style: .continuous)
+        return Path(box.cgPath.union(Tail(toward: toward).path(in: rect).cgPath))
+    }
+
     var body: some View {
         let speech = agent.speech(full: bubble.expanded)
-        let ink = Color(white: 0.10)
+        let ink = Color.white.opacity(0.96)
         let approval = agent.needsYou ? agent.permission : nil
         let slice = model.slices.first { $0.id == agent.id }
         let ago = slice?.ago ?? (agent.needsYou ? nil : slice?.busyFor)
@@ -1645,15 +1857,8 @@ struct SpeechBubble: View {
                 ? (agent.kind.isEmpty ? "Waiting for you" : "Asks: \(agent.kind)")
                 : agent.statusWord.capitalized
         return ZStack(alignment: .topLeading) {
-            Group {
-                Tail(toward: bubble.toward).fill(Color.white)
-                Tail(toward: bubble.toward).stroke(ink, style: StrokeStyle(lineWidth: 2.5, lineJoin: .round))
-                RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Color.white)
-                RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(ink, lineWidth: 2.5)
-                // Cover the outline where the tail joins the bubble.
-                Tail(toward: bubble.toward).fill(Color.white).scaleEffect(0.86)
-            }
-            .frame(width: bubble.size.width, height: bubble.size.height)
+            WheelGlass(outline: { Self.outline($0, toward: bubble.toward) }, live: model.glass)
+                .frame(width: bubble.size.width, height: bubble.size.height)
 
             HStack(spacing: 6) {
                 if approval != nil {
@@ -1663,7 +1868,7 @@ struct SpeechBubble: View {
                 }
                 Text("\(agent.space.uppercased())  ·  \(heading.uppercased())" + (ago.map { "  ·  \($0.uppercased())" } ?? ""))
                     .font(.system(size: 10, weight: .heavy)).kerning(0.5)
-                    .foregroundStyle(agent.needsYou ? Palette.accent : Color(white: 0.4)).lineLimit(1).minimumScaleFactor(0.6)
+                    .foregroundStyle(agent.needsYou ? Palette.accent : Color.white.opacity(0.62)).lineLimit(1).minimumScaleFactor(0.6)
             }
             .frame(width: bubble.size.width - 2 * RingModel.pad, height: RingModel.headerHeight, alignment: .leading)
             .offset(x: RingModel.pad, y: RingModel.pad)
@@ -1701,13 +1906,12 @@ struct SpeechBubble: View {
                      : "Point at an answer and click to send it"))
                     .font(.system(size: 10.5, weight: .medium))
                     .lineLimit(1).minimumScaleFactor(0.85)
-                    .foregroundStyle(Color(white: 0.45))
+                    .foregroundStyle(Color.white.opacity(0.58))
                     .frame(width: bubble.size.width - 2 * RingModel.pad, height: RingModel.hintHeight, alignment: .center)
                     .offset(x: RingModel.pad, y: bubble.size.height - RingModel.pad - RingModel.hintHeight + 6)
             }
         }
         .frame(width: bubble.size.width, height: bubble.size.height, alignment: .topLeading)
-        .shadow(color: .black.opacity(0.35), radius: 12, y: 5)
         .animation(.spring(response: 0.18, dampingFraction: 0.7), value: model.hoveredOption)
         .animation(.easeOut(duration: 0.15), value: model.sentOption)
         .animation(.easeOut(duration: 0.15), value: model.delivery)
@@ -1722,9 +1926,8 @@ struct SpeechBubble: View {
             .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, 14).padding(.vertical, 11)
             .frame(width: 300, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(white: 0.11).opacity(0.97)))
+            .background(WheelGlass(outline: { Path(roundedRect: $0, cornerRadius: 16, style: .continuous) }, live: model.glass))
             .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Palette.accent, lineWidth: 2))
-            .shadow(color: .black.opacity(0.4), radius: 8, y: 3)
             .frame(width: 300, height: RingModel.optionHeight, alignment: .topLeading)
     }
 
@@ -1743,16 +1946,16 @@ struct SpeechBubble: View {
         }
         // Refusing looks different from agreeing, so a "No" is never picked by mistake.
         let hotColors = deny
-            ? [Color(white: 0.42), Color(white: 0.26)]
+            ? [Color(white: 0.56), Color(white: 0.40)]
             : [Color(red: 1.0, green: 0.60, blue: 0.40), Palette.accent]
         let face: AnyShapeStyle = tint.map { AnyShapeStyle(LinearGradient(colors: [$0.opacity(0.9), $0], startPoint: .top, endPoint: .bottom)) }
             ?? (hot
                 ? AnyShapeStyle(LinearGradient(colors: hotColors, startPoint: .top, endPoint: .bottom))
-                : AnyShapeStyle(LinearGradient(colors: [Color(white: 0.98), Color(white: 0.91)], startPoint: .top, endPoint: .bottom)))
+                : AnyShapeStyle(LinearGradient(colors: [Color.white.opacity(0.17), Color.white.opacity(0.10)], startPoint: .top, endPoint: .bottom)))
         let lit = hot || tint != nil
         return HStack(spacing: 10) {
             ZStack {
-                RoundedRectangle(cornerRadius: 7, style: .continuous).fill(lit ? Color.white : Color(white: 0.14))
+                RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Color.white.opacity(lit ? 1 : 0.92))
                 switch state {
                 case .sent:
                     Image(systemName: "checkmark").font(.system(size: 12, weight: .heavy)).foregroundStyle(green)
@@ -1763,10 +1966,10 @@ struct SpeechBubble: View {
                 case .resting:
                     if own {
                         Image(systemName: "pencil").font(.system(size: 13, weight: .heavy))
-                            .foregroundStyle(hot ? (deny ? Color(white: 0.2) : Palette.accent) : Color.white)
+                            .foregroundStyle(hot ? (deny ? Color(white: 0.2) : Palette.accent) : Color(white: 0.12))
                     } else {
                         Text("\(i + 1)").font(.system(size: 13, weight: .heavy, design: .rounded))
-                            .foregroundStyle(hot ? (deny ? Color(white: 0.2) : Palette.accent) : Color.white)
+                            .foregroundStyle(hot ? (deny ? Color(white: 0.2) : Palette.accent) : Color(white: 0.12))
                     }
                 }
             }
@@ -1774,7 +1977,7 @@ struct SpeechBubble: View {
             Text(text)
                 .font(.system(size: 14, weight: .semibold, design: .rounded))
                 .italic(own)
-                .foregroundStyle(lit ? Color.white : Color(white: own ? 0.35 : 0.12))
+                .foregroundStyle(Color.white.opacity(lit ? 1 : (own ? 0.62 : 0.96)))
                 .lineLimit(1).minimumScaleFactor(0.78)
             Spacer(minLength: 0)
             if hot && tint == nil {
@@ -1785,11 +1988,11 @@ struct SpeechBubble: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(RoundedRectangle(cornerRadius: 13, style: .continuous).fill(face))
         .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous)
-            .stroke(lit ? Color.white.opacity(0.0) : Color(white: 0.10).opacity(0.22), lineWidth: 1.5))
+            .stroke(Color.white.opacity(lit ? 0 : 0.17), lineWidth: 1))
         // A darker lip underneath gives the button some depth.
         .background(RoundedRectangle(cornerRadius: 13, style: .continuous)
             .fill(tint.map { $0.opacity(0.55) }
-                  ?? (hot ? (deny ? Color(white: 0.14) : Color(red: 0.78, green: 0.26, blue: 0.20)) : Color(white: 0.72)))
+                  ?? (hot ? (deny ? Color(white: 0.24) : Color(red: 0.78, green: 0.26, blue: 0.20)) : Color.black.opacity(0.30)))
             .offset(y: hot ? 2 : 3))
         .offset(y: hot ? 1 : 0)
         .scaleEffect(hot ? 1.025 : 1)
@@ -1816,6 +2019,9 @@ final class AgentRing {
     private var lastQuestion = ""
     private var pointerOnWheel = false     // the pointer is over a wedge right now
     private var pointerOnBubble = false
+    private var bubbleRound = false        // the bubble is round the wheel from its wedge, for want of room beyond it
+    private var bubbleGap = CGFloat.infinity   // how far the pointer was from the bubble a moment ago
+    private var nearing: Date?             // when the pointer last got closer to the bubble
     private var expandedFor: String?           // agent whose bubble is showing its whole question
     private var anchor: (x: CGFloat, bottom: CGFloat)?   // keeps the answer buttons still while it grows
     private var panel: WheelPanel?
@@ -1831,6 +2037,7 @@ final class AgentRing {
     /// answered from as usual, but no window comes up and the pointer is left alone.
     init(onScreen: Bool = true) {
         self.onScreen = onScreen
+        model.glass = onScreen
     }
 
     var isOpen: Bool { timer != nil }
@@ -1883,6 +2090,9 @@ final class AgentRing {
         afterLeaving = nil
         openedAt = Date()
         model.bubble = nil
+        bubbleRound = false
+        bubbleGap = .infinity
+        nearing = nil
         model.active = true
         model.forgetCentre()
         model.unfolded = false
@@ -1907,6 +2117,7 @@ final class AgentRing {
         }
         let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
         centre = CGPoint(x: origin.x + side / 2, y: primaryHeight - (origin.y + side / 2))
+        placeCaption()
 
         if panel == nil, onScreen {
             let p = Self.makePanel(showing: model)
@@ -1938,6 +2149,7 @@ final class AgentRing {
         shown = agents
         model.layout(agents)
         model.confirmed = true
+        placeCaption()
         placeBubble()
     }
 
@@ -1946,6 +2158,7 @@ final class AgentRing {
         model.pinned = ids
         guard isOpen else { return }
         model.layout(shown)
+        placeCaption()
         placeBubble()
     }
 
@@ -2073,6 +2286,14 @@ final class AgentRing {
                                 y: rel.height - b.offset.height + b.size.height / 2)
             overBubble = CGRect(origin: .zero, size: b.size).insetBy(dx: -45, dy: -45).contains(local)
             for i in 0..<b.optionCount where RingModel.optionRect(i, in: b).insetBy(dx: -3, dy: -4).contains(local) { option = i }
+            // Is the pointer on its way to the bubble? See where the aim is changed, below.
+            let gap = hypot(max(abs(local.x - b.size.width / 2) - b.size.width / 2, 0),
+                            max(abs(local.y - b.size.height / 2) - b.size.height / 2, 0))
+            if gap < bubbleGap - 0.5 { nearing = Date() }
+            bubbleGap = gap
+        } else {
+            bubbleGap = .infinity
+            nearing = nil
         }
         // Moving onto the bubble opens up the whole question. It grows upward from its bottom
         // edge so the answer buttons stay under the pointer.
@@ -2107,6 +2328,11 @@ final class AgentRing {
         // so travelling out to the bubble keeps that agent selected.
         guard r <= model.outerRadius + 22, !overBubble || r <= model.outerRadius else { return }
         let aim = model.aim(at: rel)
+        // A bubble that is round the wheel from its wedge is reached across other wedges. While
+        // the pointer is getting closer to it, those are passed over and the question stays; a
+        // pointer that stops on one of them, or turns away, aims at it as usual.
+        if aim != model.highlighted, bubbleRound, model.bubble != nil,
+           Self.passesOver(nearing: nearing) { return }
         // Resting on the idle agents' wedge shows them.
         if aim == RingModel.foldID {
             if let since = foldSince { if Date().timeIntervalSince(since) >= Self.unfoldAfter { unfold(); return } } else { foldSince = Date() }
@@ -2123,13 +2349,35 @@ final class AgentRing {
         }
     }
 
-    /// Put the speech bubble just outside the highlighted wedge, kept on screen.
+    /// How long a pointer that has stopped getting closer to a bubble still passes over the
+    /// wedges on its way there.
+    static let passingGrace: TimeInterval = 0.3
+
+    /// Whether a pointer that last got closer to the bubble at `nearing` is still on its way there.
+    static func passesOver(nearing: Date?, now: Date = Date()) -> Bool {
+        guard let nearing else { return false }
+        return now.timeIntervalSince(nearing) < passingGrace
+    }
+
+    /// Put the caption under the wheel, or over it where the screen ends too soon underneath.
+    private func placeCaption() {
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+        let here = CGPoint(x: centre.x, y: primaryHeight - centre.y)
+        guard let screen = NSScreen.screens.first(where: { NSMouseInRect(here, $0.frame, false) }) else {
+            model.captionAbove = false
+            return
+        }
+        let bottom = primaryHeight - screen.visibleFrame.minY
+        model.captionAbove = centre.y + model.captionReach + 40 > bottom
+    }
+
+    /// Put the bubble of an agent that is asking just outside its wedge, kept on screen and off the wheel.
     private func placeBubble() {
-        // From the hub, only an agent that is waiting on you shows what it says: its question is
-        // why the wheel was opened. One that is merely the latest shows its words when pointed at.
-        guard let s = model.slices.first(where: { $0.id == model.highlighted }), s.agent.hasSpeech,
-              !model.onHub || s.agent.needsYou else {
+        // Only an agent that is waiting on you has a bubble: its question, and the answers to pick
+        // from. What any other agent is about is written under the wheel (`RingModel.caption`).
+        guard let s = model.slices.first(where: { $0.id == model.highlighted }), s.agent.hasSpeech, s.agent.needsYou else {
             model.bubble = nil
+            bubbleRound = false
             return
         }
         if s.agent.message != lastQuestion {
@@ -2143,19 +2391,28 @@ final class AgentRing {
         let metrics = RingModel.bubbleMetrics(for: s.agent, expanded: expanded)
         let size = metrics.size
         let dx = CGFloat(cos(s.mid)), dy = CGFloat(sin(s.mid))
-        let reach = s.reach + 54 + abs(dx) * size.width / 2 + abs(dy) * size.height / 2
-        var pos = CGPoint(x: dx * reach, y: dy * reach)
-        if expanded, let anchor { pos = CGPoint(x: anchor.x, y: anchor.bottom - size.height / 2) }
-        // Keep it inside the screen the wheel is on.
+        // The part of the screen the wheel is on that the bubble has to stay inside, from the wheel's centre.
         let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
         let here = CGPoint(x: centre.x, y: primaryHeight - centre.y)
+        var room: CGRect?
         if let screen = NSScreen.screens.first(where: { NSMouseInRect(here, $0.frame, false) }) {
             let v = screen.visibleFrame
-            let minX = v.minX - centre.x + size.width / 2 + 10, maxX = v.maxX - centre.x - size.width / 2 - 10
-            let top = primaryHeight - v.maxY, bottom = primaryHeight - v.minY
-            let minY = top - centre.y + size.height / 2 + 10, maxY = bottom - centre.y - size.height / 2 - 10
-            if minX < maxX { pos.x = min(max(pos.x, minX), maxX) }
-            if minY < maxY { pos.y = min(max(pos.y, minY), maxY) }
+            room = CGRect(x: v.minX - centre.x + 10, y: primaryHeight - v.maxY - centre.y + 10, width: v.width - 20, height: v.height - 20)
+        }
+        var pos: CGPoint
+        if expanded, let anchor {
+            // Showing the whole question, it grows from where it was and stays under the pointer.
+            pos = CGPoint(x: anchor.x, y: anchor.bottom - size.height / 2)
+            if let room {
+                let minX = room.minX + size.width / 2, maxX = room.maxX - size.width / 2
+                let minY = room.minY + size.height / 2, maxY = room.maxY - size.height / 2
+                if minX < maxX { pos.x = min(max(pos.x, minX), maxX) }
+                if minY < maxY { pos.y = min(max(pos.y, minY), maxY) }
+            }
+        } else {
+            let placed = RingModel.bubbleSpot(size: size, mid: s.mid, reach: s.reach, clearance: model.bubbleClearance, room: room)
+            pos = placed.spot
+            bubbleRound = placed.round
         }
         // The explanation card goes on whichever side of the bubble has room.
         var hintOnLeft = false
@@ -2282,7 +2539,7 @@ private struct ReplyView: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        let ink = Color(white: 0.10)
+        let ink = Color.white.opacity(0.96)
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Circle().fill(Palette.accent).frame(width: 8, height: 8)
@@ -2291,18 +2548,18 @@ private struct ReplyView: View {
             }
             Text(agent.speech.text)
                 .font(.system(size: 12, weight: .medium, design: .rounded))
-                .foregroundStyle(Color(white: 0.35)).lineLimit(3)
+                .foregroundStyle(Color.white.opacity(0.66)).lineLimit(3)
             TextField("Type your answer…", text: $text)
                 .textFieldStyle(.plain)
                 .font(.system(size: 15, weight: .medium, design: .rounded))
                 .foregroundStyle(ink)
                 .padding(.horizontal, 12).padding(.vertical, 10)
-                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(white: 0.94)))
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.white.opacity(0.10)))
                 .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Palette.accent, lineWidth: 2))
                 .focused($focused)
                 .onSubmit { submit() }
             HStack {
-                Text("Return to send  ·  Esc to cancel").font(.system(size: 10.5, weight: .medium)).foregroundStyle(Color(white: 0.45))
+                Text("Return to send  ·  Esc to cancel").font(.system(size: 10.5, weight: .medium)).foregroundStyle(Color.white.opacity(0.58))
                 Spacer()
                 Button("Send") { submit() }
                     .buttonStyle(.borderedProminent).tint(Palette.accent).controlSize(.small)
@@ -2311,11 +2568,10 @@ private struct ReplyView: View {
         }
         .padding(16)
         .frame(width: 420)
-        .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Color.white))
-        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(ink, lineWidth: 2.5))
-        .padding(14)   // room for the shadow
-        .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
-        .colorScheme(.light)
+        // The same glass as the bubble it takes the place of.
+        .background(WheelGlass(outline: { Path(roundedRect: $0, cornerRadius: 24, style: .continuous) }, live: true))
+        .padding(WheelGlass.bleed)   // room for the shadow
+        .colorScheme(.dark)
         .onExitCommand { cancel() }
         .onAppear { DispatchQueue.main.async { focused = true } }
     }

@@ -37,6 +37,9 @@ captured. A second copy would fight it for the mouse, so:
 - Run a built binary only with a developer flag that does one job and exits: `--snapshot`,
   `--snapshot-ring`, `--snapshot-mice`, `--detect-mice`, `--identify`, `--list-mice` or
   `--herdr-status`. Never start a built copy with no flag while another copy is running.
+- `--preview-ring` is the one flag that puts something on the owner's screen: the wheel,
+  with sample agents, at the pointer, until it is closed. It takes no button and sends
+  nothing, but run it only when the owner asks to see the wheel.
 - Give such a run an empty home folder, so that it reads default settings and leaves the
   real settings and log alone:
   `CFFIXED_USER_HOME=/tmp/mouseherdr-home dist/MouseHerdr.app/Contents/MacOS/MouseHerdr --snapshot /tmp/window.png`
