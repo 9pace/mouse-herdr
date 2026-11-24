@@ -66,9 +66,13 @@ MAIN="$(git worktree list --porcelain | sed -n 's/^worktree //p' | head -1)"
 KC="$MAIN/signing/mouseherdr.keychain-db"
 
 BUNDLE_ID="$ID" SIGNING=adhoc ./build.sh
+# codesign finds the identity only while the keychain is on the search list.
+LOGIN="$(security login-keychain | sed 's/^ *"//; s/"$//')"
+security list-keychains -d user -s "$LOGIN" "$KC"
 security unlock-keychain -p mouseherdr "$KC"
 CERT="$(security find-certificate -Z "$KC" | awk '/SHA-1 hash:/ {print $NF; exit}')"
 codesign --force --keychain "$KC" --sign "$CERT" --identifier "$ID" dist/MouseHerdr.app
+security list-keychains -d user -s "$LOGIN"   # take the keychain off the list again
 codesign --verify --strict dist/MouseHerdr.app
 
 # These two lines must be identical, or macOS will not apply the permissions to the build.
@@ -77,8 +81,13 @@ codesign -d -r- /Applications/MouseHerdr.app 2>&1 | grep designated
 ```
 
 Do not copy `signing/` into a worktree, and do not let `build.sh` make a new identity
-there with `SIGNING=local`: the first adds a keychain to the owner's search list, and a
-different certificate loses the permissions.
+there with `SIGNING=local`: a different certificate loses the permissions.
+
+Never leave the signing keychain on the search list. It is locked after a restart, and
+anything that then reads the listed keychains makes macOS ask the owner for its password,
+once per read. `./build.sh` lists it only while it signs. The steps above assume the
+owner's list holds only the login keychain, so check `security list-keychains -d user`
+before and after.
 
 ## Run a build on the owner's Mac
 
