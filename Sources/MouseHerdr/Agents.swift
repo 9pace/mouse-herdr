@@ -17,6 +17,16 @@ struct AgentInfo: Identifiable, Equatable {
     var prompt = ""                  // the dialog's own question line, e.g. "Do you want to proceed?"
     var lastActive: Date?            // when it last changed what it is doing; nil until that is known
     var folder = ""                  // the folder it was started in
+    var turn = 0                     // how many turns it has taken
+    /// The turn the person last looked at it in the Herdr app; nil if never, or not known yet.
+    var seenTurn: Int?
+    var seenKnown = false            // `seenTurn` has been read from herdr-core
+    var inApp = false                // it has a tab in the Herdr app, so it can be opened and seen
+
+    /// It has finished, and has not been looked at since. herdr-core goes on calling it done
+    /// after it is opened, so this goes by the turn it was last seen in. An agent with no tab in
+    /// the Herdr app can never be seen there, so it is not called unread.
+    var unread: Bool { status == "done" && seenKnown && inApp && seenTurn != turn }
     var helpers = 0                  // how many terminals it started with `hc run` are busy right now
     var inner = 0                    // how many sub-agents it is running inside itself are busy right now
 
@@ -360,6 +370,7 @@ final class AgentWatcher {
             var info = AgentInfo(id: id, agent: agent, status: status,
                                  space: place.first ?? agent, tab: place.count > 1 ? place[1] : "")
             info.folder = t["cwd"] as? String ?? ""
+            info.turn = (t["turn"] as? NSNumber)?.intValue ?? 0
             found.append((info, t["parent"] as? String))
         }
         // A sub-agent is a terminal an agent started with `hc run`; herdr-core names the starter as
@@ -437,6 +448,17 @@ final class AgentWatcher {
         return Date(timeIntervalSince1970: ms / 1000)
     }
 
+    /// The turn an agent was last looked at in, from its `hc get` answer. The Herdr app keeps it
+    /// in a label; an agent the app has never shown has none.
+    static func seenTurn(_ obj: [String: Any]) -> Int? {
+        ((obj["labels"] as? [String: Any])?["herdr.seen"] as? String).flatMap(Int.init)
+    }
+
+    /// Whether the agent has a tab in the Herdr app, from its `hc get` answer.
+    static func inApp(_ obj: [String: Any]) -> Bool {
+        (obj["labels"] as? [String: Any])?["herdr.tab"] != nil
+    }
+
     /// How many sub-agents the agent runs inside itself are busy, from its `hc get` answer.
     /// herdr-core lists those under "records", each with its own state; they are not terminals.
     static func busyRecords(_ obj: [String: Any]) -> Int {
@@ -461,6 +483,9 @@ final class AgentWatcher {
             var a = a
             a.title = before.title
             a.inner = before.inner
+            a.seenTurn = before.seenTurn
+            a.seenKnown = before.seenKnown
+            a.inApp = before.inApp
             a.lastActive = before.status == a.status ? before.lastActive : now
             if before.status == a.status {
                 a.message = before.message
@@ -519,6 +544,9 @@ final class AgentWatcher {
             out[i].message = status?["msg"] as? String ?? ""
             out[i].kind = status?["kind"] as? String ?? ""
             out[i].lastActive = lastActive(obj)
+            out[i].seenTurn = seenTurn(obj)
+            out[i].seenKnown = true
+            out[i].inApp = inApp(obj)
             out[i].inner = busyRecords(obj)
             read.insert(list[i].id)
             lock.unlock()
@@ -828,6 +856,8 @@ final class RingModel: ObservableObject {
     /// The idle agents each have a wedge. Until then they share one, so that the agents with
     /// something going on have the wheel to themselves.
     @Published var unfolded = false
+    /// Say in the middle what a click does. True for the first few openings.
+    @Published var hints = false
     /// The id of the wedge that stands for the idle agents.
     static let foldID = "+idle"
     /// Fewer idle agents than this are shown as they are.
@@ -1308,8 +1338,7 @@ struct RingView: View {
         let fresh = on ? 1 : s.fresh
         let start = s.start - (on ? s.widen : 0), end = s.end + (on ? s.widen : 0)
         let outer = on ? s.reach : s.outer
-        // Finished and not looked at since: herdr-core calls that done until the agent is opened.
-        let unread = a.status == "done"
+        let unread = a.unread
         let tint = unread ? a.color : a.color(freshness: fresh)
         let startGap = s.joinsPrevious ? Wedge.hairline : Wedge.gap, endGap = s.joinsNext ? Wedge.hairline : Wedge.gap
         let shape = Wedge(start: start, end: end, inner: s.inner, outer: outer, startGap: startGap, endGap: endGap)
@@ -1500,29 +1529,23 @@ struct RingView: View {
                 // Only seen for a moment: before herdr-core has answered for the first time.
                 Text(model.looking ? "Looking for" : "No agents").font(.system(size: 13, weight: .semibold))
                 Text(model.looking ? "agents…" : "running").font(.system(size: 11)).opacity(0.7)
-            } else if let focus {
-                Text(focus.statusWord).font(.system(size: 13, weight: .bold, design: .rounded)).foregroundStyle(focus.needsYou ? Palette.accent : focus.color)
-                if let since = pointed?.ago ?? pointed?.busyFor.map({ "for \($0)" }) {
-                    Text(since).font(.system(size: 10.5, weight: .medium)).opacity(0.85)
-                }
-                // On the hub itself there are two things to say about clicking, so the agent's kind makes room.
-                if !model.onHub { Text(focus.agent).font(.system(size: 10.5)).opacity(0.75).lineLimit(1) }
-                Text(model.canJump ? "click to open" : "no Herdr app").font(.system(size: 9.5)).opacity(model.onHub ? 0.8 : 0.5)
-                if model.onHub {
-                    // On the hub itself the other button puts the wheel away.
-                    Text("right-click closes").font(.system(size: 9)).opacity(0.5)
-                } else {
-                    HStack(spacing: 2) {
-                        Image(systemName: pointed?.pinned == true ? "pin.slash.fill" : "pin.fill").font(.system(size: 7.5))
-                        Text("right-click")
-                    }
-                    .font(.system(size: 9)).opacity(0.5)
+            } else if let focus, let pointed {
+                // The agent being pointed at: its name, and what it is doing.
+                name(pointed.name).font(.system(size: 13, weight: .bold, design: .rounded)).frame(width: RingModel.hubRadius * 2 - 14)
+                Text(pointed.folded > 0 ? "idle" : (pointed.ago ?? pointed.busyFor.map { "working \($0)" } ?? focus.statusWord))
+                    .font(.system(size: 10.5, weight: .semibold)).foregroundStyle(focus.needsYou ? Palette.accent : focus.color)
+                // What a click does is said the first few times, and whenever it would do nothing.
+                if !model.canJump {
+                    Text("no Herdr app").font(.system(size: 9.5)).opacity(0.6)
+                } else if model.hints {
+                    Text(pointed.folded > 0 ? "click to show" : (model.onHub ? "click opens, right-click closes" : "click to open"))
+                        .font(.system(size: 9)).opacity(0.5).multilineTextAlignment(.center).frame(width: RingModel.hubRadius * 2 - 16)
                 }
             } else if waiting > 0 {
                 Text("\(waiting)").font(.system(size: 26, weight: .bold, design: .rounded)).foregroundStyle(Palette.accent)
                 Text(waiting == 1 ? "needs you" : "need you").font(.system(size: 10.5)).opacity(0.8)
             } else {
-                Text("\(model.slices.count)").font(.system(size: 26, weight: .bold, design: .rounded))
+                Text("\(model.slices.reduce(0) { $0 + max($1.folded, 1) })").font(.system(size: 26, weight: .bold, design: .rounded))
                 Text("agents").font(.system(size: 10.5)).opacity(0.8)
             }
         }
@@ -1815,6 +1838,11 @@ final class AgentRing {
         model.active = true
         model.forgetCentre()
         model.unfolded = false
+        if onScreen {
+            let opened = UserDefaults.standard.integer(forKey: "wheelOpened")
+            model.hints = opened < Self.hintsFor
+            if opened < Self.hintsFor { UserDefaults.standard.set(opened + 1, forKey: "wheelOpened") }
+        }
         foldSince = nil
         model.confirmed = false     // what is shown at first is what was last seen; `update` brings the present
         shown = agents
@@ -1874,6 +1902,8 @@ final class AgentRing {
     }
 
     /// A right-click: pin or unpin the wedge being aimed at and stay open. Anywhere else it is an ordinary click.
+    /// How many times the wheel says what a click does before it stops.
+    static let hintsFor = 5
     private var foldSince: Date?           // when the pointer came to rest on the idle agents' wedge
     /// How long the pointer rests on the idle agents' wedge before they are shown.
     static let unfoldAfter: TimeInterval = 0.45

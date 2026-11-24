@@ -190,6 +190,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     if let o = try? JSONSerialization.jsonObject(with: out.fileHandleForReading.readDataToEndOfFile()) as? [String: Any] {
                         a.title = o["title"] as? String ?? ""
                         a.lastActive = AgentWatcher.lastActive(o)
+                        a.seenTurn = AgentWatcher.seenTurn(o)
+                        a.seenKnown = true
+                        a.inApp = AgentWatcher.inApp(o)
                         a.inner = AgentWatcher.busyRecords(o)
                         a.message = (o["status"] as? [String: Any])?["msg"] as? String ?? ""
                         a.kind = (o["status"] as? [String: Any])?["kind"] as? String ?? ""
