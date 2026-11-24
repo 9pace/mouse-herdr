@@ -22,6 +22,7 @@ enum ActionRunner {
             case .dock(let name): dock(name)
             case .middleClick: middleClick()
             case .open(let path): open(path)
+            case .twice(let code): twice(code)
             }
         }
     }
@@ -47,6 +48,26 @@ enum ActionRunner {
         post(CGKeyCode(code), true)
         post(CGKeyCode(code), false)
         for m in active.reversed() { current.remove(m.2); post(m.1, false) }
+    }
+
+    /// Press a modifier key twice in quick succession, the way a person double-taps it.
+    static func twice(_ code: Int) {
+        let flags: [Int: CGEventFlags] = [59: .maskControl, 58: .maskAlternate, 56: .maskShift, 55: .maskCommand, 63: .maskSecondaryFn]
+        guard let flag = flags[code] else { return }
+        // Off the main thread: the two taps need a pause between them.
+        DispatchQueue.global(qos: .userInteractive).async {
+            let src = CGEventSource(stateID: .hidSystemState)
+            for tap in 0..<2 {
+                for down in [true, false] {
+                    guard let e = CGEvent(keyboardEventSource: src, virtualKey: CGKeyCode(code), keyDown: down) else { continue }
+                    e.type = .flagsChanged
+                    e.flags = down ? flag : []
+                    e.setIntegerValueField(.eventSourceUserData, value: marker)
+                    e.post(tap: .cghidEventTap)
+                    usleep(down ? 35_000 : (tap == 0 ? 90_000 : 0))
+                }
+            }
+        }
     }
 
     // MARK: Media keys

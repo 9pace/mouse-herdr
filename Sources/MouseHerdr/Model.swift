@@ -138,6 +138,8 @@ enum Effect {
     case middleClick
     case dragWindow
     case open(String)
+    /// Press a modifier key twice, as for the Mac's "press Control twice" shortcuts.
+    case twice(Int)
 }
 
 struct Preset: Identifiable {
@@ -206,6 +208,8 @@ enum Catalog {
             Preset(id: "screenshot", title: "Screenshot an area", symbol: "camera.viewfinder", effect: .key(21, [.command, .shift])),
             Preset(id: "screenshotTools", title: "Screenshot tools", symbol: "camera", effect: .key(23, [.command, .shift])),
             Preset(id: "lock", title: "Lock screen", symbol: "lock", effect: .key(12, [.command, .control])),
+            // Dictation's shortcut in System Settings has to be "Press Control Key Twice" for this one.
+            Preset(id: "dictation", title: "Dictation (Control twice)", symbol: "mic", effect: .twice(59)),
         ]),
     ]
 
