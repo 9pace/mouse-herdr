@@ -234,7 +234,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
                 // "--permission" shows a request to approve a risky command instead of a question.
                 if args.contains("--permission") {
-                    list[0] = AppDelegate.sampleAgents[1]
+                    // The request goes onto the first agent. Putting the sample agent itself there
+                    // would have two agents share an address, and one wedge would go missing.
+                    let request = AppDelegate.sampleAgents[1]
+                    list[0].kind = request.kind
+                    list[0].message = request.message
+                    list[0].screenOptions = request.screenOptions
+                    list[0].prompt = request.prompt
+                    list[0].hints = request.hints
+                    list[0].typeOption = nil
                 }
             }
             if forced == nil { model.herdr = .running(agents: list.count) }
