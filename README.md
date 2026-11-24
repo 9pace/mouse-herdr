@@ -343,7 +343,8 @@ remain in your user Library.
 - Builds with `swift build` and assembles `dist/MouseHerdr.app`.
 - Signs the app with a self-signed certificate it creates in `signing/` (not committed), so
   macOS keeps your permissions across rebuilds. To make that certificate findable it adds
-  that keychain file to your keychain search list. Keep the signing files private.
+  that keychain file to your keychain search list while it signs, and takes it off again
+  afterwards. Keep the signing files private.
 - Uses the app identifier `dev.mouseherdr.app`. To customize the build, copy
   `local.env.example` to `local.env` and edit it. Keep your chosen identifier stable after
   granting permissions. `local.env` is ignored by Git and is sourced as shell code.

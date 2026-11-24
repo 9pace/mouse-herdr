@@ -167,21 +167,27 @@ else
     )
   fi
 
+  # codesign finds the identity only while its keychain is on the search list. A keychain
+  # outside ~/Library/Keychains is locked after a restart, and anything that then reads the
+  # listed keychains makes macOS ask for its password. So list it only while signing.
   # Keep each existing path intact, including keychains in directories containing spaces.
   KEYCHAINS=()
-  KEYCHAIN_PRESENT=false
   KEYCHAIN_LIST="$(security list-keychains -d user)"
   while IFS= read -r line; do
     keychain="${line#*\"}"
     keychain="${keychain%\"*}"
     [ -n "$keychain" ] || continue
+    [ "$keychain" = "$KC" ] && continue
     KEYCHAINS+=("$keychain")
-    if [ "$keychain" = "$KC" ]; then KEYCHAIN_PRESENT=true; fi
   done <<< "$KEYCHAIN_LIST"
-  if [ "$KEYCHAIN_PRESENT" = false ]; then
-    KEYCHAINS+=("$KC")
-    security list-keychains -d user -s "${KEYCHAINS[@]}"
+  if [ "${#KEYCHAINS[@]}" -eq 0 ]; then
+    keychain="$(security login-keychain)"
+    keychain="${keychain#*\"}"
+    KEYCHAINS=("${keychain%\"*}")
   fi
+  unlist_keychain() { security list-keychains -d user -s "${KEYCHAINS[@]}"; }
+  trap unlist_keychain EXIT
+  security list-keychains -d user -s "${KEYCHAINS[@]}" "$KC"
   security unlock-keychain -p mouseherdr "$KC"
   # Use the fingerprint so another checkout's certificate with the same name cannot be chosen.
   CERT=$(security find-certificate -Z "$KC" | awk '/SHA-1 hash:/ {print $NF; exit}')
@@ -191,6 +197,8 @@ else
   fi
   python3 scripts/bundle_signing.py "$APP" --keychain "$KC" --sign "$CERT"
   codesign --force --keychain "$KC" --sign "$CERT" --identifier "$BUNDLE_ID" "$APP"
+  unlist_keychain
+  trap - EXIT
 fi
 codesign --verify --deep --strict --verbose=2 "$APP"
 echo "built $APP"
