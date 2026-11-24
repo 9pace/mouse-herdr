@@ -1279,6 +1279,8 @@ struct Wedge: Shape {
     var endGap: CGFloat = Wedge.gap
     static let gap: CGFloat = 3.5
     static let hairline: CGFloat = 0.75
+    /// How round a wedge's corners are, where it has the room.
+    static let corner: CGFloat = 8
 
     // Lets a wedge grow and shrink smoothly rather than jump.
     var animatableData: AnimatablePair<AnimatablePair<Double, Double>, AnimatablePair<CGFloat, CGFloat>> {
@@ -1288,11 +1290,49 @@ struct Wedge: Shape {
 
     func path(in rect: CGRect) -> Path {
         let c = CGPoint(x: rect.midX, y: rect.midY)
+        // Glass has no sharp corners. A thin or short wedge has smaller ones, and one with no
+        // room for any keeps them square.
+        var r = min(Self.corner, (outer - inner) / 4)
+        while r >= 1 {
+            if let p = rounded(round: c, by: r) { return p }
+            r /= 2
+        }
         var p = Path()
         p.addArc(center: c, radius: outer, startAngle: .radians(start + Double(startGap / outer)),
                  endAngle: .radians(end - Double(endGap / outer)), clockwise: false)
         p.addArc(center: c, radius: inner, startAngle: .radians(end - Double(endGap / inner)),
                  endAngle: .radians(start + Double(startGap / inner)), clockwise: true)
+        p.closeSubpath()
+        return p
+    }
+
+    /// The wedge with each corner rounded to `r`, or nil where it is too small for that.
+    private func rounded(round c: CGPoint, by r: CGFloat) -> Path? {
+        // A side is a line that runs the gap's width beside the line through the middle of the
+        // wheel. The middle of a corner's round is `r` inside the side and `r` inside the rim or
+        // the inner edge: how far along the side that is, and at what angle from it.
+        func corner(_ gap: CGFloat, _ far: CGFloat) -> (along: CGFloat, angle: Double)? {
+            let off = gap + r
+            guard far > off else { return nil }
+            let along = (far * far - off * off).squareRoot()
+            return (along, atan2(Double(off), Double(along)))
+        }
+        guard let so = corner(startGap, outer - r), let si = corner(startGap, inner + r),
+              let eo = corner(endGap, outer - r), let ei = corner(endGap, inner + r) else { return nil }
+        let startOuter = start + so.angle, startInner = start + si.angle
+        let endOuter = end - eo.angle, endInner = end - ei.angle
+        guard endOuter > startOuter, endInner > startInner, so.along > si.along, eo.along > ei.along else { return nil }
+        func at(_ angle: Double, _ far: CGFloat) -> CGPoint {
+            CGPoint(x: c.x + CGFloat(cos(angle)) * far, y: c.y + CGFloat(sin(angle)) * far)
+        }
+        let quarter = Double.pi / 2
+        var p = Path()
+        p.addArc(center: c, radius: outer, startAngle: .radians(startOuter), endAngle: .radians(endOuter), clockwise: false)
+        p.addArc(center: at(endOuter, outer - r), radius: r, startAngle: .radians(endOuter), endAngle: .radians(end + quarter), clockwise: false)
+        p.addArc(center: at(endInner, inner + r), radius: r, startAngle: .radians(end + quarter), endAngle: .radians(endInner + 2 * quarter), clockwise: false)
+        p.addArc(center: c, radius: inner, startAngle: .radians(endInner), endAngle: .radians(startInner), clockwise: true)
+        p.addArc(center: at(startInner, inner + r), radius: r, startAngle: .radians(startInner + 2 * quarter), endAngle: .radians(start + 3 * quarter), clockwise: false)
+        p.addArc(center: at(startOuter, outer - r), radius: r, startAngle: .radians(start + 3 * quarter), endAngle: .radians(startOuter + 4 * quarter), clockwise: false)
         p.closeSubpath()
         return p
     }
@@ -1365,7 +1405,6 @@ struct ArcText: View {
 
 struct RingView: View {
     @ObservedObject var model: RingModel
-    @Environment(\.colorScheme) private var scheme
     static let side: CGFloat = 1400
     /// How far the wedge that is pointed at lifts off the wheel.
     static let lift: CGFloat = 16
@@ -1375,8 +1414,9 @@ struct RingView: View {
             let t = timeline.date.timeIntervalSinceReferenceDate
             let cover = Self.cover(model.notice == nil ? model.slices.first { $0.id == model.highlighted } : nil)
             ZStack {
-                // A light shade sets the wheel off from the desktop. The glass carries the rest.
-                let shade = scheme == .dark ? 0.24 : 0.10
+                // A shade under the wheel. It shows in the gaps between the panes and round the hub,
+                // which holds the wheel together as one thing, and it dims what the glass lets through.
+                let shade = 0.34
                 Circle()
                     .fill(RadialGradient(colors: [Color.black.opacity(shade), Color.black.opacity(shade * 0.65), .clear],
                                          center: .center, startRadius: 40, endRadius: model.outerRadius + 90))
@@ -1414,6 +1454,8 @@ struct RingView: View {
             }
             .frame(width: Self.side, height: Self.side)
         }
+        // White words on clear glass, as Control Center has, whichever way the Mac is set.
+        .environment(\.colorScheme, .dark)
         .animation(.spring(response: 0.22, dampingFraction: 0.72), value: model.highlighted)
         .animation(.easeOut(duration: 0.18), value: model.notice)
     }
@@ -1461,7 +1503,7 @@ struct RingView: View {
     /// The wheel with nothing in it: an empty track where the wedges go, and the reason in the middle.
     private func noticeCard(_ n: RingModel.Notice) -> some View {
         let track: CGFloat = 196
-        let tint = WheelGlass.ink(n.tint, scheme)
+        let tint = n.tint
         return ZStack {
             GlassShape(shape: Ring(radius: track, width: 34), live: model.glass, glowStrength: 0.18)
             Circle().stroke(Color.primary.opacity(0.22), style: StrokeStyle(lineWidth: 1, dash: [3, 9]))
@@ -1506,7 +1548,7 @@ struct RingView: View {
         let start = s.start - (on ? s.widen : 0), end = s.end + (on ? s.widen : 0)
         let outer = on ? s.reach : s.outer
         let unread = a.unread
-        let tint = WheelGlass.ink(unread ? a.color : a.color(freshness: fresh), scheme)
+        let tint = unread ? a.color : a.color(freshness: fresh)
         let startGap = s.joinsPrevious ? Wedge.hairline : Wedge.gap, endGap = s.joinsNext ? Wedge.hairline : Wedge.gap
         // Where the wedge that is pointed at lies over this one, this one ends.
         let away = cover?.offsetBy(dx: -moved.width, dy: -moved.height)
@@ -1636,8 +1678,9 @@ struct RingView: View {
             }
         }
         .foregroundStyle(urgent ? Color.white : Color.primary)
+        .shadow(color: .black.opacity(WheelGlass.wordShadow), radius: 2, y: 0.5)
         .frame(width: width)
-        .opacity(0.55 + 0.45 * fresh)
+        .opacity(0.66 + 0.34 * fresh)
         .scaleEffect(scale)
     }
 
@@ -1676,8 +1719,9 @@ struct RingView: View {
             .font(.system(size: 12, weight: .semibold))
         }
         .foregroundStyle(a.needsYou ? Color.white : Color.primary)
+        .shadow(color: .black.opacity(WheelGlass.wordShadow), radius: 2, y: 0.5)
         .frame(width: max(40, length))
-        .opacity(0.55 + 0.45 * fresh)
+        .opacity(0.66 + 0.34 * fresh)
     }
 
     /// How many sub-agents the agent has busy right now.
@@ -1737,7 +1781,7 @@ struct RingView: View {
         let waiting = model.slices.filter { $0.agent.needsYou }.count
         let pointed = model.slices.first { $0.id == model.highlighted }
         let focus = pointed?.agent
-        let accent = WheelGlass.ink(Palette.accent, scheme)
+        let accent = Palette.accent
         return VStack(spacing: 1) {
             if model.slices.isEmpty {
                 // Only seen for a moment: before herdr-core has answered for the first time.
@@ -1756,7 +1800,7 @@ struct RingView: View {
                 name(pointed.name).font(.system(size: 13, weight: .semibold)).frame(width: RingModel.hubRadius * 2 - 14)
                 Text(pointed.folded > 0 ? "idle" : (pointed.ago ?? pointed.busyFor.map { "working \($0)" } ?? focus.statusWord))
                     .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(focus.needsYou ? accent : WheelGlass.ink(focus.color, scheme))
+                    .foregroundStyle(focus.needsYou ? accent : focus.color)
                 // What a click does is said the first few times, and whenever it would do nothing.
                 if !model.canJump {
                     Text("no Herdr app").font(.system(size: 9.5)).opacity(0.6)
@@ -1773,6 +1817,7 @@ struct RingView: View {
             }
         }
         .foregroundStyle(.primary)
+        .shadow(color: .black.opacity(WheelGlass.wordShadow), radius: 2, y: 0.5)
         .frame(width: RingModel.hubRadius * 2, height: RingModel.hubRadius * 2)
         // With the pointer on it, the hub is a button for the agent it names.
         .background(WheelGlass(outline: { Path(ellipseIn: $0) }, live: model.glass, weight: .panel, lit: model.onHub,
@@ -1789,17 +1834,18 @@ private extension View {
     }
 }
 
-/// The glass the wheel is made of. On the screen it is the system's own: what is behind the
-/// window shows through it, blurred and bent at the edges, light or dark as the Mac is set. In
-/// a picture or a test there is nothing behind to show, and it is a see-through fill instead.
+/// The glass the wheel is made of. On the screen it is the system's own clear glass, as Control
+/// Center's is: what is behind the window shows through it, a little blurred and bent at the
+/// edges, under a dim that keeps white words readable. In a picture or a test there is nothing
+/// behind to show, and it is a see-through fill instead.
 struct WheelGlass: View {
     enum Weight {
         /// A wedge: lets the most through.
         case pane
-        /// Something to read from, such as the bubble: more frost, so that words stay clear.
+        /// Something to read from, such as the bubble: more dim, so that words stay clear.
         case panel
         /// A small piece to read from. The system lets more through a small piece of glass than
-        /// a large one, so this takes more frost again.
+        /// a large one, so this takes more dim again.
         case card
     }
 
@@ -1824,7 +1870,6 @@ struct WheelGlass: View {
     var hidden: Path? = nil
     /// How far outside its frame the pane is still drawn: its arrow, and its shadow.
     static let bleed: CGFloat = 40
-    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         GeometryReader { g in
@@ -1843,9 +1888,9 @@ struct WheelGlass: View {
                 if live {
                     backdrop(moved, wide).offset(x: -b, y: -b)
                 } else {
-                    path.fill(scheme == .dark ? Self.standInDark : Self.standInLight)
+                    path.fill(Self.standIn)
                 }
-                path.fill(frost)
+                path.fill(dim)
                 if let wash { path.fill(wash) }
                 // Light catches the top edge of glass and leaves the bottom one.
                 path.stroke(rim, lineWidth: 1)
@@ -1860,52 +1905,38 @@ struct WheelGlass: View {
     @ViewBuilder private func backdrop(_ path: Path, _ size: CGSize) -> some View {
         #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
-            Color.clear.frame(width: size.width, height: size.height).glassEffect(.regular, in: Outline(path: path))
+            Color.clear.frame(width: size.width, height: size.height).glassEffect(.clear, in: Outline(path: path))
         } else {
-            BlurBehind(path: path, size: size, dark: scheme == .dark).frame(width: size.width, height: size.height)
+            BlurBehind(path: path, size: size).frame(width: size.width, height: size.height)
         }
         #else
-        BlurBehind(path: path, size: size, dark: scheme == .dark).frame(width: size.width, height: size.height)
+        BlurBehind(path: path, size: size).frame(width: size.width, height: size.height)
         #endif
     }
 
-    /// Glass takes its brightness from what is behind it, so over a dark window in light mode, or
-    /// a white one in dark mode, words on it would be hard to read. A little of the appearance's
-    /// own color over the glass keeps the two apart. These are the numbers to change for glass
-    /// that is clearer or more solid.
-    private var frost: Color {
-        let dark = scheme == .dark
+    /// Clear glass is as bright as what is behind it, so over a white window white words on it
+    /// would be lost. A dim over the glass keeps the two apart. These are the numbers to change
+    /// for glass that is clearer or more solid.
+    private var dim: Color {
         switch weight {
-        case .pane:
-            if lit { return dark ? Color.white.opacity(0.14) : Color.white.opacity(0.50) }
-            return dark ? Color.black.opacity(0.24) : Color.white.opacity(0.22)
-        case .panel:
-            if lit { return dark ? Color.white.opacity(0.10) : Color.white.opacity(0.62) }
-            return dark ? Color.black.opacity(0.36) : Color.white.opacity(0.42)
-        case .card:
-            return dark ? Color.black.opacity(0.52) : Color.white.opacity(0.62)
+        // The pane the pointer is on is clearer than the rest, and no brighter: over a white
+        // window a brighter one would lose its words.
+        case .pane: return Color.black.opacity(lit ? 0.12 : 0.30)
+        case .panel: return Color.black.opacity(lit ? 0.26 : 0.40)
+        case .card: return Color.black.opacity(0.50)
         }
     }
 
+    /// Light catches the top edge of glass and leaves the bottom one.
     private var rim: LinearGradient {
-        let dark = scheme == .dark
-        let top = dark ? (lit ? 0.62 : 0.34) : (lit ? 1.0 : 0.85)
-        let bottom = dark ? (lit ? 0.24 : 0.09) : (lit ? 0.60 : 0.30)
-        return LinearGradient(colors: [Color.white.opacity(top), Color.white.opacity(bottom)], startPoint: .top, endPoint: .bottom)
+        LinearGradient(colors: [Color.white.opacity(lit ? 0.70 : 0.38), Color.white.opacity(lit ? 0.26 : 0.10)],
+                       startPoint: .top, endPoint: .bottom)
     }
 
     /// The glass where nothing can be blurred.
-    static let standInDark = Color(white: 0.16).opacity(0.70)
-    static let standInLight = Color(white: 0.97).opacity(0.62)
-
-    /// The colors that say what an agent is doing were picked for a dark wheel. On light glass
-    /// they are deepened a little so that they still stand out.
-    static func ink(_ color: Color, _ scheme: ColorScheme) -> Color {
-        guard scheme == .light,
-              let deep = NSColor(color).usingColorSpace(.sRGB)?.blended(withFraction: 0.26, of: NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 1))
-        else { return color }
-        return Color(nsColor: deep)
-    }
+    static let standIn = Color(white: 0.14).opacity(0.62)
+    /// A soft shadow under words written straight on a pane, for the times a bright window is behind it.
+    static let wordShadow = 0.45
 
     /// Everything but the pane, and but the ground something else lies over.
     private static func outside(_ path: Path, and hidden: Path?, in size: CGSize) -> Path {
@@ -1923,7 +1954,6 @@ struct WheelGlass: View {
     private struct BlurBehind: NSViewRepresentable {
         let path: Path
         let size: CGSize
-        let dark: Bool
 
         final class Coordinator {
             var path: Path?
@@ -1934,15 +1964,15 @@ struct WheelGlass: View {
 
         func makeNSView(context: Context) -> NSVisualEffectView {
             let v = NSVisualEffectView()
+            v.material = .hudWindow
             v.blendingMode = .behindWindow
             // The wheel's window is never the active one, and the glass must not go flat for that.
             v.state = .active
+            v.appearance = NSAppearance(named: .vibrantDark)
             return v
         }
 
         func updateNSView(_ v: NSVisualEffectView, context: Context) {
-            v.material = dark ? .hudWindow : .popover
-            v.appearance = NSAppearance(named: dark ? .vibrantDark : .vibrantLight)
             let c = context.coordinator
             guard c.path != path || c.size != size else { return }
             c.path = path
@@ -2136,7 +2166,6 @@ struct SpeechBubble: View {
     }
 
     @ObservedObject var model: RingModel
-    @Environment(\.colorScheme) private var scheme
 
     /// The panel and its arrow as one outline, so that glass has no seam where they meet.
     static func outline(_ rect: CGRect, toward: CGSize) -> Path {
@@ -2150,7 +2179,7 @@ struct SpeechBubble: View {
         let speech = agent.speech(full: bubble.expanded)
         let ink = Color.primary
         let quiet = Color.secondary
-        let accent = WheelGlass.ink(Palette.accent, scheme)
+        let accent = Palette.accent
         let approval = agent.needsYou ? agent.permission : nil
         let slice = model.slices.first { $0.id == agent.id }
         let ago = slice?.ago ?? (agent.needsYou ? nil : slice?.busyFor)
@@ -2167,7 +2196,7 @@ struct SpeechBubble: View {
                 if approval != nil {
                     Image(systemName: "exclamationmark.shield.fill").font(.system(size: 11, weight: .semibold)).foregroundStyle(accent)
                 } else {
-                    Circle().fill(agent.needsYou ? accent : WheelGlass.ink(agent.color, scheme)).frame(width: 7, height: 7)
+                    Circle().fill(agent.needsYou ? accent : agent.color).frame(width: 7, height: 7)
                 }
                 (Text(agent.space).fontWeight(.semibold).foregroundColor(ink)
                  + Text("  ·  \(heading)").foregroundColor(agent.needsYou ? accent : quiet)
@@ -2863,6 +2892,7 @@ private struct ReplyView: View {
         // The same glass as the bubble it takes the place of.
         .background(WheelGlass(outline: { Path(roundedRect: $0, cornerRadius: 22, style: .continuous) }, live: true))
         .padding(WheelGlass.bleed)   // room for the shadow
+        .colorScheme(.dark)
         .onExitCommand { cancel() }
         .onAppear { DispatchQueue.main.async { focused = true } }
     }

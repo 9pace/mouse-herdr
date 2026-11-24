@@ -76,8 +76,8 @@ Click the GIF to watch **MouseHerdr: Welcome to My Herd** on YouTube
 - Point at an agent that is not asking and the wheel writes underneath which space and
   tab it is in and what its session is about, in full, where the wedge has room only for
   a short name.
-- The wheel is glass, light or dark as your Mac is set. What is behind it shows through
-  each wedge, blurred, and a slim light inside a wedge's rim has the color of what its
+- The wheel is clear glass with white words, as Control Center is. What is behind it shows
+  through each wedge, and a slim light inside a wedge's rim has the color of what its
   agent is doing. An agent that needs you is in the accent color and pulses, and one that
   finished without being looked at is washed in green and glows.
 - If it asked a question, a panel of the same glass shows it. Each offered choice is a row

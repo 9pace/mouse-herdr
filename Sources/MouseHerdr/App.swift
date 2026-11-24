@@ -336,12 +336,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // glass real. The picture has in it whatever is on the display behind the wheel, and
             // taking it needs Screen Recording for the terminal. With "--reply" it is of the box for
             // typing an answer to the first agent, which only a window can draw.
-            // The wheel is light or dark as the Mac is set; "--dark" and "--light" pick one for the picture.
-            let dark = args.contains("--dark") ? true : args.contains("--light") ? false : nil
             if args.contains("--on-screen") {
                 model.glass = true
                 let panel = AgentRing.makePanel(showing: model)
-                if let dark { panel.appearance = NSAppearance(named: dark ? .darkAqua : .aqua) }
                 let reply = args.contains("--reply") ? list.first : nil
                 if let agent = reply {
                     panel.contentView = NSHostingView(rootView: ReplyBox.picture(for: agent).frame(maxWidth: .infinity, maxHeight: .infinity))
@@ -363,7 +360,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // "--clear" leaves the background transparent, for laying the wheel over other artwork.
             let backdrop = args.contains("--clear") ? Color.clear : Color(white: 0.55)
             let view = ZStack { backdrop; RingView(model: model) }.frame(width: RingView.side, height: RingView.side)
-                .environment(\.colorScheme, dark == true ? .dark : .light)
             let r = ImageRenderer(content: view)
             r.scale = 1.5
             if let cg = r.cgImage {

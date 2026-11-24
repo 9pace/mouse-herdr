@@ -129,8 +129,7 @@ dist/MouseHerdr.app/Contents/MacOS/MouseHerdr --snapshot-ring /tmp/mouseherdr-to
 ```
 
 A picture cannot show the wheel's glass, because nothing is behind it to show through:
-there it is drawn as a see-through fill instead. `--dark` draws the wheel as it is in dark
-mode; without it the picture is of light mode. To see the glass, and how the wheel
+there it is drawn as a see-through fill instead. To see the glass, and how the wheel
 follows the pointer, put the wheel itself on the screen with the same sample agents:
 
 ```bash
@@ -143,9 +142,8 @@ off it.
 
 For a picture of the real glass, add `--on-screen` to a `--snapshot-ring` command. The wheel
 is shown as it was posed, in the middle of the main display, for about a second, and the
-picture is a screenshot of it. It does not take the pointer. `--light` and `--dark` pick
-the appearance, and `--then-highlight N` moves the aim to wedge N once the wheel is up, to
-show what a change of aim leaves behind. The picture has in it whatever
+picture is a screenshot of it. It does not take the pointer. `--then-highlight N` moves the
+aim to wedge N once the wheel is up, to show what a change of aim leaves behind. The picture has in it whatever
 is on the display behind the wheel, so look at it before you share it, and the terminal
 needs Screen Recording permission. With `--reply` it is of the box for typing an answer:
 
