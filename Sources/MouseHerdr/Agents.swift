@@ -2663,6 +2663,11 @@ final class ReplyBox: NSObject, NSWindowDelegate {
 
     var isOpen: Bool { panel != nil }
 
+    /// Developer aid: the box as it is drawn, for a picture. It sends nothing.
+    static func picture(for agent: AgentInfo) -> some View {
+        ReplyView(agent: agent, send: { _ in }, cancel: {})
+    }
+
     func show(for agent: AgentInfo, at spot: CGPoint, send: @escaping (String) -> Void) {
         close(restore: false)
         previous = NSWorkspace.shared.frontmostApplication

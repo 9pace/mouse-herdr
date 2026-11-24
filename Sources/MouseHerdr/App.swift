@@ -331,6 +331,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     }
                 }
             }
+            // "--on-screen" takes the picture from the screen: the wheel is shown as it was posed, in
+            // its own window in the middle of the main display, for a moment. Only there is its
+            // glass real. The picture has in it whatever is on the display behind the wheel, and
+            // taking it needs Screen Recording for the terminal. With "--reply" it is of the box for
+            // typing an answer to the first agent, which only a window can draw.
+            if args.contains("--on-screen") {
+                model.glass = true
+                let panel = AgentRing.makePanel(showing: model)
+                let reply = args.contains("--reply") ? list.first : nil
+                if let agent = reply {
+                    panel.contentView = NSHostingView(rootView: ReplyBox.picture(for: agent).frame(maxWidth: .infinity, maxHeight: .infinity))
+                }
+                photograph(panel, side: reply == nil ? RingView.side : 620, to: ringShot ?? "")
+                return
+            }
             // "--clear" leaves the background transparent, for laying the wheel over other artwork.
             let backdrop = args.contains("--clear") ? Color.clear : Color(white: 0.55)
             let view = ZStack { backdrop; RingView(model: model) }.frame(width: RingView.side, height: RingView.side)
@@ -592,6 +607,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     // MARK: Snapshot
+
+    /// Developer aid: show a window in the middle of the main display, without letting it take the
+    /// pointer, take a screenshot of the square of that side around its middle, and quit.
+    private func photograph(_ panel: NSPanel, side: CGFloat, to path: String) {
+        guard let screen = NSScreen.screens.first else {
+            print("no display to show it on")
+            exit(1)
+        }
+        panel.ignoresMouseEvents = true
+        let size = panel.frame.size
+        panel.setFrameOrigin(NSPoint(x: screen.frame.midX - size.width / 2, y: screen.frame.midY - size.height / 2))
+        panel.orderFrontRegardless()
+        // Long enough for the window to be drawn and its glass to have something to show.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            // screencapture measures from the top-left corner of the main display.
+            let width = min(side, screen.frame.width), height = min(side, screen.frame.height)
+            let shot = Process()
+            shot.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+            shot.arguments = ["-x", "-R", "\(Int((screen.frame.width - width) / 2)),\(Int((screen.frame.height - height) / 2)),\(Int(width)),\(Int(height))", path]
+            try? shot.run()
+            shot.waitUntilExit()
+            panel.orderOut(nil)
+            exit(shot.terminationStatus)
+        }
+    }
 
     private func snapshot(to path: String, dark: Bool, slot: Slot?) {
         state.hidStatus = .connected
